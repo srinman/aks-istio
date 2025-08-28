@@ -42,8 +42,8 @@ istioctl version
 First, set up your environment variables. **Customize these values** for your lab:
 
 ```bash
-export CLUSTER=aksistio3
-export RESOURCE_GROUP=aksistio3rg
+export CLUSTER=aksistio4
+export RESOURCE_GROUP=aksistio4rg
 export LOCATION=eastus2
 ```
 
@@ -347,8 +347,11 @@ EOF
 Enable automatic sidecar injection for your application namespace:
 
 ```bash
+kubectl get pods -n sampleapp
 # Replace 'asm-1-25' with your actual revision number from Step 1.6
-kubectl label namespace sampleapp istio.io/rev=asm-1-25
+kubectl label namespace sampleapp istio.io/rev=asm-1-25  
+kubectl get pods -n sampleapp
+
 ```
 
 ### Step 3.6: Force Pod Recreation to Inject Sidecars
