@@ -14,38 +14,8 @@ By the end of this lab, you will understand and implement:
 4. **Service Mesh Visualization**: Service topology and traffic flow analysis with Kiali
 5. **Distributed Tracing**: Request tracing across services using Jaeger
 
-## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Istio Observability Stack                   │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │   Grafana   │    │   Jaeger    │    │    Kiali    │         │
-│  │ (Metrics &  │    │ (Tracing)   │    │ (Topology)  │         │
-│  │ Dashboards) │    │             │    │             │         │
-│  └─────────────┘    └─────────────┘    └─────────────┘         │
-│         │                   │                   │              │
-│         ▼                   ▼                   ▼              │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │              Azure Monitor Workspace                   │   │
-│  │            (Prometheus + Log Analytics)                │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              │                                 │
-│                              ▼                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                   Istio Service Mesh                   │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │   │
-│  │  │   Service   │  │   Service   │  │   Service   │    │   │
-│  │  │  + Envoy    │  │  + Envoy    │  │  + Envoy    │    │   │
-│  │  │   Proxy     │  │   Proxy     │  │   Proxy     │    │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘    │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
 
----
 
 ## Environment Preparation and Cleanup
 

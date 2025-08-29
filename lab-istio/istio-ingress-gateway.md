@@ -238,8 +238,8 @@ External Request → Gateway (defines entry point) → VirtualService (routing r
 Ensure your environment variables are set correctly:
 
 ```bash
-export CLUSTER=aksistio3
-export RESOURCE_GROUP=aksistio3rg
+export CLUSTER=aksistio4
+export RESOURCE_GROUP=aksistio4rg
 export LOCATION=eastus2
 ```
 
@@ -291,6 +291,9 @@ kubectl label namespace default istio.io/rev=asm-1-25
 
 # Verify the label was applied
 kubectl get ns default --show-labels
+
+# bounce pods if required
+kubectl delete pods --all -n default
 ```
 
 ### Step 2.2: Deploy Bookinfo Sample Application
@@ -379,7 +382,7 @@ Check how the Gateway affects the ingress gateway configuration:
 # Check listeners again - should now show HTTP listener on port 80
 istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-25
 
-# Check routes - still minimal without VirtualService
+# Check routes - blackhole route 
 istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25
 
 # List gateways

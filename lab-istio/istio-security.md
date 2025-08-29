@@ -441,6 +441,11 @@ spec:
 EOF
 ```
 
+**Test connectivity again:**
+```bash
+kubectl -n testns exec netshoot -it -- curl productpage.default:9080/productpage
+```
+
 ### Step 5: Add testns to the Mesh
 
 To enable secure communication from testns, we need to add it to the service mesh:
