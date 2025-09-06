@@ -425,13 +425,13 @@ After creating the configmaps, the AMA-Metrics pods will automatically restart t
 ```bash
 # Watch for AMA-Metrics pods to restart (this may take 2-3 minutes)
 echo "Waiting for AMA-Metrics pods to restart with new configuration..."
-kubectl get pods -n kube-system -l app.kubernetes.io/name=ama-metrics -w
+#kubectl get pods -n kube-system -l app.kubernetes.io/name=ama-metrics -w
 
 # Verify the configmaps are created
 kubectl get configmap -n kube-system | grep ama-metrics
 
 # Check AMA-Metrics logs for configuration loading
-kubectl logs -n kube-system -l app.kubernetes.io/name=ama-metrics -c prometheus-collector 
+#kubectl logs -n kube-system -l app.kubernetes.io/name=ama-metrics -c prometheus-collector 
 ```
 
 **Step 1.5.4: Verify Prometheus Annotations on Istio Pods**

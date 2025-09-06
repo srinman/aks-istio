@@ -1,0 +1,138 @@
+<!--
+    Azure API Management Policy for Istio Gateway Integration
+    This policy handles secure communication between APIM and Istio Ingress Gateway
+    with TLS termination, header management, and backend authentication
+-->
+<policies>
+    <inbound>
+        <!-- Rate limiting -->
+        <rate-limit calls="100" renewal-period="60" />
+        <quota calls="1000" renewal-period="86400" />
+        
+        <!-- Authentication (uncomment for subscription key requirement) -->
+        <!-- <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
+            <openid-config url="https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid_configuration" />
+            <audiences>
+                <audience>api://your-api-audience</audience>
+            </audiences>
+        </validate-jwt> -->
+        
+        <!-- Set backend service URL -->
+        <set-backend-service base-url="https://{{istio-gateway-ip}}" />
+        
+        <!-- Add security headers for Istio Gateway -->
+        <set-header name="Host" exists-action="override">
+            <value>bookinfo.istio.local</value>
+        </set-header>
+        
+        <!-- Add client identification headers -->
+        <set-header name="X-Forwarded-For" exists-action="override">
+            <value>@(context.Request.IpAddress)</value>
+        </set-header>
+        
+        <set-header name="X-Forwarded-Proto" exists-action="override">
+            <value>https</value>
+        </set-header>
+        
+        <set-header name="X-Client-ID" exists-action="override">
+            <value>apim-gateway</value>
+        </set-header>
+        
+        <!-- Add request tracing -->
+        <set-header name="X-Request-ID" exists-action="override">
+            <value>@(Guid.NewGuid().ToString())</value>
+        </set-header>
+        
+        <!-- CORS policy for browser requests -->
+        <cors allow-credentials="true">
+            <allowed-origins>
+                <origin>*</origin>
+            </allowed-origins>
+            <allowed-methods>
+                <method>GET</method>
+                <method>POST</method>
+                <method>PUT</method>
+                <method>DELETE</method>
+                <method>OPTIONS</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>*</header>
+            </allowed-headers>
+            <expose-headers>
+                <header>*</header>
+            </expose-headers>
+        </cors>
+    </inbound>
+    
+    <backend>
+        <!-- Backend timeout and retry policy -->
+        <retry condition="@(context.Response.StatusCode >= 500)" count="3" interval="1" max-interval="10" delta="1" first-fast-retry="false">
+            <forward-request buffer-request-body="true" />
+        </retry>
+        
+        <!-- Optional: Client certificate authentication for mTLS -->
+        <!-- Uncomment and configure if implementing mutual TLS -->
+        <!--
+        <authentication-certificate certificate-id="apim-client-cert" />
+        -->
+        
+        <!-- Forward request to Istio Gateway with SSL validation disabled for self-signed certs -->
+        <forward-request />
+    </backend>
+    
+    <outbound>
+        <!-- Add response headers for tracking -->
+        <set-header name="X-Powered-By" exists-action="override">
+            <value>Azure API Management + Istio Service Mesh</value>
+        </set-header>
+        
+        <set-header name="X-Response-Time" exists-action="override">
+            <value>@(context.Elapsed.TotalMilliseconds.ToString())</value>
+        </set-header>
+        
+        <!-- Remove internal headers -->
+        <set-header name="Server" exists-action="delete" />
+        <set-header name="X-Envoy-Upstream-Service-Time" exists-action="delete" />
+        
+        <!-- Cache policy for static content -->
+        <choose>
+            <when condition="@(context.Request.Url.Path.Contains("/static/"))">
+                <cache-store duration="3600" />
+                <set-header name="Cache-Control" exists-action="override">
+                    <value>public, max-age=3600</value>
+                </set-header>
+            </when>
+        </choose>
+    </outbound>
+    
+    <on-error>
+        <!-- Error handling and logging -->
+        <set-header name="ErrorMessage" exists-action="override">
+            <value>@(context.LastError.Message)</value>
+        </set-header>
+        
+        <set-header name="ErrorSource" exists-action="override">
+            <value>@(context.LastError.Source)</value>
+        </set-header>
+        
+        <!-- Custom error response for 5xx errors -->
+        <choose>
+            <when condition="@(context.Response.StatusCode >= 500)">
+                <return-response>
+                    <set-status code="503" reason="Service Temporarily Unavailable" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "service_unavailable"),
+                            new JProperty("message", "The backend service is temporarily unavailable. Please try again later."),
+                            new JProperty("timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")),
+                            new JProperty("request_id", context.RequestId)
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+        </choose>
+    </on-error>
+</policies>
