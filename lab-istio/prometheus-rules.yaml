@@ -1,0 +1,338 @@
+# Prometheus Alert Rules for Istio Service Mesh
+# Apply these rules to Azure Monitor managed Prometheus
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: istio-service-mesh-alerts
+  namespace: aks-istio-system
+  labels:
+    prometheus: aks-istio
+spec:
+  groups:
+  
+  # =====================================
+  # SERVICE MESH HEALTH ALERTS
+  # =====================================
+  - name: istio.servicemesh.health
+    interval: 30s
+    rules:
+    
+    - alert: IstioHighRequestLatency
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (destination_service_name, le)
+        ) > 5000
+      for: 2m
+      labels:
+        severity: warning
+        component: istio
+      annotations:
+        summary: "High request latency detected"
+        description: "P99 latency for service {{ $labels.destination_service_name }} is {{ $value }}ms"
+        runbook_url: "https://istio.io/latest/docs/ops/common-problems/network-issues/"
+        
+    - alert: IstioHighErrorRate
+      expr: |
+        sum(rate(istio_requests_total{response_code!~"2.."}[5m])) by (destination_service_name) /
+        sum(rate(istio_requests_total[5m])) by (destination_service_name) > 0.05
+      for: 1m
+      labels:
+        severity: critical
+        component: istio
+      annotations:
+        summary: "High error rate detected"
+        description: "Error rate for service {{ $labels.destination_service_name }} is {{ $value | humanizePercentage }}"
+        runbook_url: "https://istio.io/latest/docs/ops/common-problems/"
+        
+    - alert: IstioRequestVolumeHigh
+      expr: |
+        sum(rate(istio_requests_total[1m])) by (destination_service_name) > 100
+      for: 5m
+      labels:
+        severity: warning
+        component: istio
+      annotations:
+        summary: "High request volume detected"
+        description: "Request rate for service {{ $labels.destination_service_name }} is {{ $value }} req/sec"
+        
+  # =====================================
+  # ENVOY PROXY HEALTH ALERTS
+  # =====================================
+  - name: istio.envoy.health
+    interval: 30s
+    rules:
+    
+    - alert: EnvoyProxyDown
+      expr: |
+        up{job=~".*envoy.*"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: envoy
+      annotations:
+        summary: "Envoy proxy is down"
+        description: "Envoy proxy {{ $labels.instance }} is not responding"
+        
+    - alert: EnvoyHighMemoryUsage
+      expr: |
+        envoy_server_memory_heap_size > 500000000  # 500MB
+      for: 5m
+      labels:
+        severity: warning
+        component: envoy
+      annotations:
+        summary: "Envoy proxy high memory usage"
+        description: "Envoy proxy {{ $labels.instance }} memory usage is {{ $value | humanizeBytes }}"
+        
+    - alert: EnvoyConfigUpdateFailure
+      expr: |
+        increase(envoy_server_admin_config_update_failure_total[5m]) > 0
+      for: 1m
+      labels:
+        severity: warning
+        component: envoy
+      annotations:
+        summary: "Envoy configuration update failed"
+        description: "Envoy proxy {{ $labels.instance }} failed to update configuration"
+
+  # =====================================
+  # ISTIO CONTROL PLANE ALERTS
+  # =====================================
+  - name: istio.controlplane.health
+    interval: 30s
+    rules:
+    
+    - alert: IstiodDown
+      expr: |
+        up{job="istiod"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: istiod
+      annotations:
+        summary: "Istiod is down"
+        description: "Istiod control plane component is not responding"
+        
+    - alert: PilotPushErrorsHigh
+      expr: |
+        rate(pilot_xds_pushes{type="nds_failure"}[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: warning
+        component: pilot
+      annotations:
+        summary: "High pilot push errors"
+        description: "Pilot is experiencing high push error rate: {{ $value }} errors/sec"
+        
+    - alert: PilotProxyQueueFull
+      expr: |
+        pilot_proxy_queue_time > 10
+      for: 2m
+      labels:
+        severity: warning
+        component: pilot
+      annotations:
+        summary: "Pilot proxy queue time high"
+        description: "Pilot proxy queue time is {{ $value }}s for {{ $labels.instance }}"
+
+  # =====================================
+  # SECURITY ALERTS
+  # =====================================
+  - name: istio.security
+    interval: 30s
+    rules:
+    
+    - alert: IstioUnauthorizedRequests
+      expr: |
+        sum(rate(istio_requests_total{response_code="403"}[5m])) by (destination_service_name) > 1
+      for: 1m
+      labels:
+        severity: warning
+        component: security
+      annotations:
+        summary: "Unauthorized requests detected"
+        description: "Service {{ $labels.destination_service_name }} is receiving unauthorized requests"
+        
+    - alert: IstioMTLSFailure
+      expr: |
+        sum(rate(istio_requests_total{response_code="503",response_flags=~".*UAEX.*"}[5m])) > 0
+      for: 1m
+      labels:
+        severity: critical
+        component: security
+      annotations:
+        summary: "mTLS authentication failure"
+        description: "mTLS authentication failures detected in the mesh"
+
+  # =====================================
+  # GATEWAY ALERTS
+  # =====================================
+  - name: istio.gateway.health
+    interval: 30s
+    rules:
+    
+    - alert: IstioGatewayDown
+      expr: |
+        up{job=~".*gateway.*"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: gateway
+      annotations:
+        summary: "Istio gateway is down"
+        description: "Istio gateway {{ $labels.instance }} is not responding"
+        
+    - alert: IstioGatewayHighLatency
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(istio_request_duration_milliseconds_bucket{source_app="istio-gateway"}[5m])) by (le)
+        ) > 3000
+      for: 2m
+      labels:
+        severity: warning
+        component: gateway
+      annotations:
+        summary: "High gateway latency"
+        description: "Gateway P95 latency is {{ $value }}ms"
+
+---
+# Recording Rules for commonly used queries
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: istio-recording-rules
+  namespace: aks-istio-system
+  labels:
+    prometheus: aks-istio
+spec:
+  groups:
+  
+  # =====================================
+  # SERVICE LEVEL INDICATORS (SLIs)
+  # =====================================
+  - name: istio.sli.recording
+    interval: 30s
+    rules:
+    
+    # Request rate by service
+    - record: istio:request_rate
+      expr: |
+        sum(rate(istio_requests_total[5m])) by (destination_service_name)
+        
+    # Error rate by service  
+    - record: istio:error_rate
+      expr: |
+        sum(rate(istio_requests_total{response_code!~"2.."}[5m])) by (destination_service_name) /
+        sum(rate(istio_requests_total[5m])) by (destination_service_name)
+        
+    # P99 latency by service
+    - record: istio:latency_p99
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (destination_service_name, le)
+        )
+        
+    # P95 latency by service
+    - record: istio:latency_p95
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (destination_service_name, le)
+        )
+        
+    # P50 latency by service
+    - record: istio:latency_p50
+      expr: |
+        histogram_quantile(0.50,
+          sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (destination_service_name, le)
+        )
+
+  # =====================================
+  # AGGREGATED METRICS
+  # =====================================
+  - name: istio.aggregated.recording
+    interval: 30s
+    rules:
+    
+    # Total mesh request rate
+    - record: istio:mesh_request_rate
+      expr: |
+        sum(istio:request_rate)
+        
+    # Average mesh error rate
+    - record: istio:mesh_error_rate
+      expr: |
+        sum(istio:request_rate * istio:error_rate) / sum(istio:request_rate)
+        
+    # Mesh P99 latency (weighted average)
+    - record: istio:mesh_latency_p99
+      expr: |
+        quantile(0.99, istio:latency_p99)
+        
+    # Service availability (uptime percentage)
+    - record: istio:service_availability
+      expr: |
+        (1 - istio:error_rate) * 100
+
+---
+# Node and Pod level alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kubernetes-resources-alerts
+  namespace: aks-istio-system
+  labels:
+    prometheus: aks-istio
+spec:
+  groups:
+  
+  # =====================================
+  # KUBERNETES RESOURCE ALERTS
+  # =====================================
+  - name: kubernetes.resources
+    interval: 30s
+    rules:
+    
+    - alert: PodCPUUsageHigh
+      expr: |
+        rate(container_cpu_usage_seconds_total[5m]) * 100 > 80
+      for: 5m
+      labels:
+        severity: warning
+        component: kubernetes
+      annotations:
+        summary: "High CPU usage in pod"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has high CPU usage: {{ $value }}%"
+        
+    - alert: PodMemoryUsageHigh
+      expr: |
+        (container_memory_working_set_bytes / container_spec_memory_limit_bytes) * 100 > 90
+      for: 5m
+      labels:
+        severity: warning
+        component: kubernetes
+      annotations:
+        summary: "High memory usage in pod"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has high memory usage: {{ $value }}%"
+        
+    - alert: PodRestartingFrequently
+      expr: |
+        rate(kube_pod_container_status_restarts_total[15m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+        component: kubernetes
+      annotations:
+        summary: "Pod restarting frequently"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting frequently"
+        
+    - alert: NodeNotReady
+      expr: |
+        kube_node_status_condition{condition="Ready",status="true"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        component: kubernetes
+      annotations:
+        summary: "Node is not ready"
+        description: "Node {{ $labels.node }} is not in Ready state"

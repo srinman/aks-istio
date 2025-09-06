@@ -1,0 +1,283 @@
+// Application Insights Sample Queries (KQL)
+// Use these queries in Azure Portal > Application Insights > Logs
+
+// =====================================
+// DISTRIBUTED TRACING QUERIES
+// =====================================
+
+// 1. Show all requests in the last hour with response times
+requests
+| where timestamp > ago(1h)
+| project timestamp, name, duration, resultCode, operation_Id
+| order by duration desc
+| take 20
+
+// 2. Find slow requests (>5 seconds) and their dependencies
+let slowRequests = requests
+    | where timestamp > ago(1h)
+    | where duration > 5000
+    | project operation_Id, name, duration;
+dependencies
+| where timestamp > ago(1h)
+| join kind=inner slowRequests on operation_Id
+| project timestamp, name, target, duration, resultCode, operation_Id
+| order by duration desc
+
+// 3. Track a specific request through all services
+dependencies
+| where operation_Id == "replace-with-actual-operation-id"
+| project timestamp, name, target, duration, success
+| order by timestamp
+
+// 4. Service dependency map data
+requests
+| where timestamp > ago(1h)
+| summarize 
+    RequestCount = count(),
+    AvgDuration = avg(duration),
+    FailureRate = countif(success == false) * 100.0 / count()
+    by name
+| order by RequestCount desc
+
+// =====================================
+// PERFORMANCE ANALYSIS QUERIES
+// =====================================
+
+// 5. Response time percentiles by service
+requests
+| where timestamp > ago(24h)
+| summarize 
+    P50 = percentile(duration, 50),
+    P95 = percentile(duration, 95),
+    P99 = percentile(duration, 99),
+    RequestCount = count()
+    by name
+| order by P95 desc
+
+// 6. Error rate trending
+requests
+| where timestamp > ago(24h)
+| summarize 
+    Total = count(),
+    Errors = countif(success == false)
+    by bin(timestamp, 1h)
+| extend ErrorRate = (Errors * 100.0) / Total
+| project timestamp, ErrorRate, Total, Errors
+| render timechart
+
+// 7. Top slowest dependencies
+dependencies
+| where timestamp > ago(1h)
+| where duration > 1000  // > 1 second
+| summarize 
+    AvgDuration = avg(duration),
+    MaxDuration = max(duration),
+    CallCount = count()
+    by target, type
+| order by AvgDuration desc
+| take 10
+
+// =====================================
+// BUSINESS METRICS QUERIES
+// =====================================
+
+// 8. Custom events and metrics
+customEvents
+| where timestamp > ago(1h)
+| where name == "ProductPageView"
+| summarize EventCount = count() by bin(timestamp, 5m)
+| render timechart
+
+// 9. User session analysis
+requests
+| where timestamp > ago(24h)
+| summarize 
+    SessionDuration = max(timestamp) - min(timestamp),
+    PageViews = count()
+    by user_Id
+| where PageViews > 1
+| order by SessionDuration desc
+
+// =====================================
+// CONTAINER INSIGHTS QUERIES (KQL)
+// =====================================
+
+// 10. Container logs with errors
+ContainerLog
+| where TimeGenerated > ago(1h)
+| where LogEntry contains "error" or LogEntry contains "exception" or LogEntry contains "failed"
+| where Namespace == "bookinfo"
+| project TimeGenerated, ContainerName, LogEntry
+| order by TimeGenerated desc
+| take 50
+
+// 11. Pod resource utilization
+Perf
+| where TimeGenerated > ago(1h)
+| where ObjectName == "K8SContainer"
+| where CounterName in ("cpuUsageNanoCores", "memoryWorkingSetBytes")
+| where InstanceName contains "productpage"
+| summarize avg(CounterValue) by CounterName, bin(TimeGenerated, 5m)
+| render timechart
+
+// 12. Kubernetes events
+KubeEvents
+| where TimeGenerated > ago(24h)
+| where Namespace == "bookinfo"
+| where Reason in ("FailedScheduling", "FailedMount", "Unhealthy", "Killing", "Created")
+| project TimeGenerated, Reason, Message, Name
+| order by TimeGenerated desc
+
+// 13. Container restart analysis
+KubeEvents
+| where TimeGenerated > ago(24h)
+| where Reason == "Killing" or Reason == "Started"
+| where Namespace == "bookinfo"
+| summarize RestartCount = count() by Name, bin(TimeGenerated, 1h)
+| render timechart
+
+// =====================================
+// CORRELATION QUERIES
+// =====================================
+
+// 14. Correlate application errors with infrastructure events
+let errorRequests = requests
+    | where timestamp > ago(1h)
+    | where success == false
+    | project timestamp, operation_Id, name;
+let infraEvents = KubeEvents
+    | where TimeGenerated > ago(1h)
+    | where Reason in ("Unhealthy", "FailedMount", "OutOfMemory")
+    | project TimeGenerated, Reason, Message, Name;
+errorRequests
+| join kind=leftouter (infraEvents) on $left.timestamp == $right.TimeGenerated
+| project timestamp, name, operation_Id, Reason, Message
+
+// 15. Performance correlation with resource usage
+let slowRequests = requests
+    | where timestamp > ago(1h)
+    | where duration > 3000
+    | summarize AvgDuration = avg(duration) by bin(timestamp, 5m);
+let cpuUsage = Perf
+    | where TimeGenerated > ago(1h)
+    | where CounterName == "cpuUsageNanoCores"
+    | summarize AvgCPU = avg(CounterValue) by bin(TimeGenerated, 5m);
+slowRequests
+| join kind=inner cpuUsage on timestamp == TimeGenerated
+| project timestamp, AvgDuration, AvgCPU
+| render scatterchart
+
+// =====================================
+// ALERTING QUERIES
+// =====================================
+
+// 16. High error rate alert query
+requests
+| where timestamp > ago(5m)
+| summarize 
+    Total = count(),
+    Errors = countif(success == false)
+| extend ErrorRate = (Errors * 100.0) / Total
+| where ErrorRate > 5  // Alert if error rate > 5%
+
+// 17. High response time alert
+requests
+| where timestamp > ago(5m)
+| summarize P95Duration = percentile(duration, 95)
+| where P95Duration > 5000  // Alert if P95 > 5 seconds
+
+// 18. Container resource alert
+Perf
+| where TimeGenerated > ago(5m)
+| where CounterName == "memoryWorkingSetBytes"
+| where InstanceName contains "productpage"
+| summarize AvgMemory = avg(CounterValue)
+| where AvgMemory > 500000000  // Alert if memory > 500MB
+
+// =====================================
+// ADVANCED ANALYSIS QUERIES
+// =====================================
+
+// 19. Service dependency analysis with failure correlation
+let timeRange = ago(1h);
+let services = requests
+    | where timestamp > timeRange
+    | distinct name;
+dependencies
+| where timestamp > timeRange
+| join kind=inner services on $left.name == $right.name
+| summarize 
+    TotalCalls = count(),
+    FailedCalls = countif(success == false),
+    AvgDuration = avg(duration)
+    by target
+| extend FailureRate = (FailedCalls * 100.0) / TotalCalls
+| order by FailureRate desc, AvgDuration desc
+
+// 20. End-to-end request flow analysis
+let requestId = "replace-with-actual-operation-id";
+union requests, dependencies
+| where operation_Id == requestId
+| project timestamp, itemType, name, target, duration, success
+| order by timestamp
+
+// =====================================
+// CUSTOM DIMENSIONS QUERIES
+// =====================================
+
+// 21. Query with custom dimensions (if instrumented)
+requests
+| where timestamp > ago(1h)
+| where customDimensions has "version"
+| extend ServiceVersion = tostring(customDimensions.version)
+| summarize 
+    RequestCount = count(),
+    AvgDuration = avg(duration)
+    by ServiceVersion
+| order by RequestCount desc
+
+// 22. Geographic distribution (if available)
+requests
+| where timestamp > ago(24h)
+| where client_CountryOrRegion != ""
+| summarize RequestCount = count() by client_CountryOrRegion
+| order by RequestCount desc
+| take 10
+
+// =====================================
+// PROMETHEUS QUERIES (PromQL)
+// Use these in Grafana or Azure Monitor Workspace
+// =====================================
+
+// Request rate per service
+sum(rate(istio_requests_total[5m])) by (destination_service_name)
+
+// P99 latency
+histogram_quantile(0.99, 
+  sum(rate(istio_request_duration_milliseconds_bucket[5m])) 
+  by (destination_service_name, le)
+)
+
+// Error rate by service
+sum(rate(istio_requests_total{response_code!~"2.."}[5m])) by (destination_service_name) /
+sum(rate(istio_requests_total[5m])) by (destination_service_name)
+
+// Request volume
+sum(istio_requests_total) by (destination_service_name)
+
+// TCP connections
+sum(istio_tcp_connections_opened_total) by (destination_service_name)
+
+// =====================================
+// USAGE NOTES
+// =====================================
+
+/*
+1. Replace "replace-with-actual-operation-id" with real operation IDs from your traces
+2. Adjust time ranges (ago(1h), ago(24h)) based on your needs
+3. Modify namespace filters ("bookinfo") to match your deployment
+4. Add custom dimensions based on your application's instrumentation
+5. Combine queries with | render timechart, barchart, or piechart for visualization
+6. Use these queries as basis for creating alerts and dashboards
+7. For large datasets, consider using sampling or summarization
+*/
