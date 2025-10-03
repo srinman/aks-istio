@@ -1,5 +1,7 @@
 # Lab: Azure API Management to Istio Ingress Gateway - Secure Traffic Management
 
+**TESTING IN PROGRESS**
+
 ## Overview
 This lab extends the basic Istio Ingress Gateway configuration to integrate with Azure API Management (APIM). You will learn how to:
 - Configure TLS/mTLS between APIM and Istio Ingress Gateway
@@ -27,7 +29,7 @@ This lab extends the basic Istio Ingress Gateway configuration to integrate with
                             ┌─────────────────────┐
                             │  Azure API          │
                             │  Management         │
-                            │  (VNET-injected)    │
+                            │  (VNET-injected)    │s
                             └─────────┬───────────┘
                                       │ TLS/mTLS
                                       │ Backend API Call

@@ -1,0 +1,280 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ama-metrics-settings-configmap
+  namespace: kube-system
+data:
+  schema-version: v1
+  config-version: "istio-v1"
+  
+  prometheus-collector-settings: |-
+    cluster_alias = ""
+    https_config = true
+  
+  default-scrape-settings-enabled: |-
+    kubelet = true
+    coredns = true
+    cadvisor = true
+    kubeproxy = true
+    apiserver = true
+    kubestate = true
+    nodeexporter = true
+    windowsexporter = false
+    windowskubeproxy = false
+    kappiebasic = true
+    networkobservabilityRetina = true
+    networkobservabilityHubble = true
+    networkobservabilityCilium = true
+    prometheuscollectorhealth = true
+    controlplane-apiserver = true
+    controlplane-cluster-autoscaler = false
+    controlplane-node-auto-provisioning = false
+    controlplane-kube-scheduler = true
+    controlplane-kube-controller-manager = true
+    controlplane-etcd = true
+    acstor-capacity-provisioner = false
+    acstor-metrics-exporter = false
+    local-csi-driver = false
+
+  # Enable scraping for Istio control plane and bookinfo namespaces
+  pod-annotation-based-scraping: |-
+    podannotationnamespaceregex = "aks-istio-system|aks-istio-ingress|aks-istio-egress|bookinfo"
+
+  default-targets-metrics-keep-list: |-
+    kubelet = ""
+    coredns = ""
+    cadvisor = ""
+    kubeproxy = ""
+    apiserver = ""
+    kubestate = ""
+    nodeexporter = ""
+    windowsexporter = ""
+    windowskubeproxy = ""
+    podannotations = ""
+    kappiebasic = ""
+    networkobservabilityRetina = ""
+    networkobservabilityHubble = ""
+    networkobservabilityCilium = ""
+    controlplane-apiserver = ""
+    controlplane-cluster-autoscaler = ""
+    controlplane-node-auto-provisioning = ""
+    controlplane-kube-scheduler = ""
+    controlplane-kube-controller-manager = ""
+    controlplane-etcd = ""
+    acstor-capacity-provisioner = ""
+    acstor-metrics-exporter = ""
+    local-csi-driver = ""
+    minimalingestionprofile = true
+
+  default-targets-scrape-interval-settings: |-
+    kubelet = "30s"
+    coredns = "30s"
+    cadvisor = "30s"
+    kubeproxy = "30s"
+    apiserver = "30s"
+    kubestate = "30s"
+    nodeexporter = "30s"
+    windowsexporter = "30s"
+    windowskubeproxy = "30s"
+    kappiebasic = "30s"
+    networkobservabilityRetina = "30s"
+    networkobservabilityHubble = "30s"
+    networkobservabilityCilium = "30s"
+    prometheuscollectorhealth = "30s"
+    acstor-capacity-provisioner = "30s"
+    acstor-metrics-exporter = "30s"
+    local-csi-driver = "30s"
+    podannotations = "15s"
+
+  debug-mode: |-
+    enabled = false
+
+  # Custom scraping configuration for Istio components
+  prometheus-collector-configmap: |-
+    scrape_configs:
+    # Istio Control Plane - Pilot (Istiod)
+    - job_name: 'istio-pilot'
+      kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+          - aks-istio-system
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: istiod;http-monitoring
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:15014
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        action: replace
+        target_label: service_name
+      scrape_interval: 15s
+      metrics_path: '/stats/prometheus'
+
+    # Istio Proxy (Envoy sidecars) metrics
+    - job_name: 'istio-proxy'
+      kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+          - aks-istio-system
+          - aks-istio-ingress
+          - aks-istio-egress
+          - bookinfo
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: .*-envoy-prom
+      - source_labels: [__meta_kubernetes_endpoint_address_target_kind, __meta_kubernetes_endpoint_address_target_name]
+        action: keep
+        regex: Node;(.*)
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:15090
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_endpoint_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: pod_name
+      scrape_interval: 15s
+      metrics_path: '/stats/prometheus'
+
+    # Istio Gateway metrics
+    - job_name: 'istio-gateway'
+      kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+          - aks-istio-ingress
+          - aks-istio-egress
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: istio-ingressgateway|istio-egressgateway
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:15090
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        action: replace
+        target_label: service_name
+      scrape_interval: 15s
+      metrics_path: '/stats/prometheus'
+
+    # Bookinfo application metrics (pods with Istio sidecars)
+    - job_name: 'bookinfo-pods'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+          - bookinfo
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+      scrape_interval: 15s
+
+  # Kube-state-metrics configuration for enhanced Kubernetes metrics
+  ksm-config: |-
+    resources:
+      certificatesigningrequests: {}
+      configmaps: {}
+      cronjobs: {}
+      daemonsets: {}
+      deployments: {}
+      endpoints: {}
+      horizontalpodautoscalers: {}
+      ingresses: {}
+      jobs: {}
+      leases: {}
+      limitranges: {}
+      mutatingwebhookconfigurations: {}
+      namespaces: {}
+      networkpolicies: {}
+      nodes: {}
+      persistentvolumeclaims: {}
+      persistentvolumes: {}
+      poddisruptionbudgets: {}
+      pods: {}
+      replicasets: {}
+      replicationcontrollers: {}
+      resourcequotas: {}
+      secrets: {}
+      services: {}
+      statefulsets: {}
+      storageclasses: {}
+      validatingwebhookconfigurations: {}
+      volumeattachments: {}
+    labels_allow_list:
+      pods:
+        - app
+        - version
+        - app.kubernetes.io/name
+        - app.kubernetes.io/version
+        - app.kubernetes.io/component
+        - app.kubernetes.io/part-of
+        - app.kubernetes.io/managed-by
+        - security.istio.io/tlsMode
+        - service.istio.io/canonical-name
+        - service.istio.io/canonical-revision
+      services:
+        - app
+        - version
+        - app.kubernetes.io/name
+        - app.kubernetes.io/version
+        - app.kubernetes.io/component
+      deployments:
+        - app
+        - version
+        - app.kubernetes.io/name
+        - app.kubernetes.io/version
+        - app.kubernetes.io/component
+      namespaces:
+        - istio-injection
+        - istio.io/rev
+    annotations_allow_list:
+      pods:
+        - prometheus.io/scrape
+        - prometheus.io/port
+        - prometheus.io/path
+        - sidecar.istio.io/status
+        - sidecar.istio.io/inject
+      namespaces:
+        - istio-injection
+        - istio.io/rev

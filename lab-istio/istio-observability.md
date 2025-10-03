@@ -88,6 +88,9 @@ export RESOURCE_GROUP="aksistio4rg"
 export INFRA_RG="infrarg"
 export AMW_NAME="amwforaks"
 export AMG_NAME="amgforaks"
+export CLUSTER=aksistio4
+export RESOURCE_GROUP=aksistio4rg
+export LOCATION=eastus2
 
 # Verify Azure resources exist
 echo "Verifying Azure resources..."
@@ -184,6 +187,8 @@ Istio automatically generates metrics for:
 **Deploy the Bookinfo application for comprehensive metrics testing:**
 
 ```bash
+# check revision and use it for labelling namespace below
+az aks show --name ${CLUSTER} --resource-group ${RESOURCE_GROUP} --query 'serviceMeshProfile'
 # Create and label namespace
 kubectl create namespace bookinfo
 kubectl label namespace bookinfo istio.io/rev=asm-1-25
@@ -248,7 +253,50 @@ spec:
 EOF
 ```
 
+```bash
+# ensure that only bookinfo-gateway is listed - delete other gateway resources if any 
+kubectl get gateway -A 
+
+istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-25
+# Expected output below!
+#ADDRESSES PORT  MATCH DESTINATION
+#0.0.0.0   80    ALL   Route: http.80
+#0.0.0.0   15021 ALL   Inline Route: /healthz/ready*
+#0.0.0.0   15090 ALL   Inline Route: /stats/prometheus*
+
+
+
+istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25
+# Expected output below!
+#NAME        VHOST NAME     DOMAINS     MATCH                  VIRTUAL SERVICE
+#http.80     *:80           *           /productpage           bookinfo.bookinfo
+#http.80     *:80           *           /static*               bookinfo.bookinfo
+#http.80     *:80           *           /login                 bookinfo.bookinfo
+#http.80     *:80           *           /logout                bookinfo.bookinfo
+#http.80     *:80           *           /api/v1/products*      bookinfo.bookinfo
+#            backend        *           /stats/prometheus*     
+#            backend        *           /healthz/ready* 
+
+
+# Try to access the external IP (should get 404 - no routes configured yet)
+EXTERNAL_IP=$(kubectl get svc aks-istio-ingressgateway-external -n aks-istio-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "External IP: $EXTERNAL_IP"
+
+curl -v http://$EXTERNAL_IP/productpage
+# expected result:  curl is able to get page content
+
+```
+
 ### Step 1.5: Configure Azure Monitor Managed Prometheus for Istio Metrics
+
+Reference documentation:  
+https://learn.microsoft.com/en-us/azure/azure-monitor/containers/kubernetes-monitoring-enable?tabs=cli  
+
+Terminology: 
+Workspace - place to store metrics or logs
+Azure Managed Workspace -  It's a managed Prometheus and a place to store prometheus metrics
+Log Analytics Workspace -  It's a managed logging solution and a place to store container logs and also control plane logs  
+Azure Managed Grafana Workspace - It's a managed Grafana to make the Prometheus metrics collected from your cluster available via Grafana dashboards
 
 Before verifying Istio proxy metrics, we need to configure Azure Monitor Managed Prometheus to properly scrape Istio metrics. This requires creating specific configmaps in the `kube-system` namespace.
 
@@ -260,7 +308,7 @@ Azure Monitor Managed Prometheus supports four different configmaps that provide
 
 | ConfigMap Name | Purpose | Scope | AMA Pod Reading It | Use Case |
 |---|---|---|---|---|
-| **ama-metrics-settings-configmap** | General addon settings and configuration | Cluster-wide | **All AMA pods**<br>- `ama-metrics-*` (replica)<br>- `ama-metrics-node-*` (DaemonSet)<br>- `ama-metrics-ksm-*` (kube-state-metrics)<br>- `ama-metrics-operator-targets-*` | - Enable/disable default scrape targets<br>- Configure pod annotation-based scraping<br>- Set metric keep-lists and scrape intervals<br>- Control cluster alias and debug mode |
+| **ama-metrics-settings-configmap**   https://aka.ms/azureprometheus-addon-settings-configmap  | General addon settings and configuration | Cluster-wide | **All AMA pods**<br>- `ama-metrics-*` (replica)<br>- `ama-metrics-node-*` (DaemonSet)<br>- `ama-metrics-ksm-*` (kube-state-metrics)<br>- `ama-metrics-operator-targets-*` | - Enable/disable default scrape targets<br>- Configure pod annotation-based scraping<br>- Set metric keep-lists and scrape intervals<br>- Control cluster alias and debug mode |
 | **ama-metrics-prometheus-config** | Custom Prometheus scrape jobs for cluster-level services | Replica (singleton) | **`ama-metrics-*` (replica pod only)**<br>- Handles cluster-wide targets<br>- Runs as single instance | - Add custom scrape jobs for any services<br>- **✅ Sufficient for Istio metrics collection**<br>- Configure service discovery and relabeling<br>- Scrape both mesh and proxy metrics |
 | **ama-metrics-prometheus-config-node** | Custom Prometheus scrape jobs for node-level targets | DaemonSet (per Linux node) | **`ama-metrics-node-*` (DaemonSet pods only)**<br>- One pod per Linux node<br>- Access to `$NODE_IP` variable | - Scrape node-specific services<br>- Access services using `$NODE_IP` variable<br>- Collect per-node metrics |
 | **ama-metrics-prometheus-config-node-windows** | Custom Prometheus scrape jobs for Windows node-level targets | DaemonSet (per Windows node) | **`ama-metrics-node-windows-*` (Windows DaemonSet pods only)**<br>- One pod per Windows node<br>- Access to `$NODE_IP` variable | - Scrape Windows node-specific services<br>- Access services using `$NODE_IP` variable<br>- Collect per-Windows-node metrics |
@@ -460,36 +508,198 @@ The AMA-Metrics pods will automatically:
 2. Restart in 2-3 minutes to apply the new configuration
 3. Begin scraping metrics according to the new settings
 
-### Step 2: Verify Istio Proxy Metrics Generation
+## Istio Metrics Architecture Overview
 
-**Step 2.1: Check Basic Envoy Admin Interface**
+Before diving into the verification steps, let's understand how Istio metrics flow from generation to visualization:
 
-```bash
-# Check if Envoy admin interface is accessible
-kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- pilot-agent request GET /ready
-
-# Check basic stats endpoint
-kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- pilot-agent request GET /stats | head -10
-
-# Check Prometheus metrics endpoint
-kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- pilot-agent request GET /stats/prometheus | head -10
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           AKS Cluster with Istio Service Mesh                  │
+│                                                                                 │
+│  ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐  │
+│  │   Pod: netshoot     │    │   Pod: client       │    │   Pod: productpage  │  │
+│  │  ┌───────────────┐  │    │  ┌───────────────┐  │    │  ┌───────────────┐  │  │
+│  │  │ netshoot      │  │    │  │ netshoot      │  │    │  │ productpage   │  │  │
+│  │  │ container     │  │    │  │ container     │  │    │  │ container     │  │  │
+│  │  └───────────────┘  │    │  └───────────────┘  │    │  └───────────────┘  │  │
+│  │  ┌───────────────┐  │    │  ┌───────────────┐  │    │  ┌───────────────┐  │  │
+│  │  │ istio-proxy   │◄─┼────┼──┤ istio-proxy   │    │    │  │ istio-proxy   │  │  │
+│  │  │ (Envoy)       │  │    │  │ (Envoy)       │    │    │  │ (Envoy)       │  │  │
+│  │  │ :15000/stats/ │  │    │  │ :15000/stats/ │    │    │  │ :15000/stats/ │  │  │
+│  │  │ prometheus    │  │    │  │ prometheus    │    │    │  │ prometheus    │  │  │
+│  │  └───────────────┘  │    │  └───────────────┘  │    │  └───────────────┘  │  │
+│  └─────────────────────┘    └─────────────────────┘    └─────────────────────┘  │
+│           ▲                           │                           ▲             │
+│           │ [Step 2]                  │ HTTP Request              │             │
+│           │ Verify metrics            │ TO netshoot               │             │
+│           │ generation                │ service                   │             │
+│           │                           ▼                           │             │
+│  ┌─────────────────────┐    ┌─────────────────────┐              │             │
+│  │ AMA-Metrics Pods    │    │   Kubernetes        │              │             │
+│  │ (Azure Monitor      │    │   Service           │              │             │
+│  │ Managed Prometheus) │    │   Discovery         │              │             │
+│  │                     │    │                     │              │             │
+│  │ ┌─────────────────┐ │    │ ┌─────────────────┐ │              │             │
+│  │ │ ama-metrics-*   │ │    │ │ netshoot-svc    │ │              │             │
+│  │ │ (replica)       │ │    │ │ :8080           │ │              │             │
+│  │ │                 │ │    │ └─────────────────┘ │              │             │
+│  │ │ Scrapes :15000/ │ │    └─────────────────────┘              │             │
+│  │ │ stats/prometheus│ │                                         │             │
+│  │ └─────────────────┘ │                                         │             │
+│  └─────────────────────┘                                         │             │
+│           │ [Step 3]                                              │             │
+│           │ Verify scraping                                       │             │
+│           │                                                       │             │
+│           ▼                                                       │             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+            │                                                       │
+            │ [Step 4]                                              │
+            │ Verify metrics in AMW                                 │
+            │                                                       │
+            ▼                                                       │
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     Azure Monitor Workspace (AMW)                              │
+│                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                 Managed Prometheus Storage                              │    │
+│  │                                                                         │    │
+│  │  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐          │    │
+│  │  │ istio_requests_ │ │ istio_request_  │ │ up              │          │    │
+│  │  │ total           │ │ duration_ms     │ │                 │          │    │
+│  │  │ {labels...} 31  │ │ {labels...}     │ │ {labels...} 1   │          │    │
+│  │  └─────────────────┘ └─────────────────┘ └─────────────────┘          │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────────┘
+            │ [Step 5]
+            │ Verify metrics in AMG
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     Azure Managed Grafana (AMG)                                │
+│                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                        Grafana Dashboards                               │    │
+│  │                                                                         │    │
+│  │  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐          │    │
+│  │  │ Istio Service   │ │ Istio Workload  │ │ Request Rate    │          │    │
+│  │  │ Dashboard       │ │ Dashboard       │ │ Graph           │          │    │
+│  │  │ (ID: 7636)      │ │ (ID: 7630)      │ │                 │          │    │
+│  │  └─────────────────┘ └─────────────────┘ └─────────────────┘          │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Step 2.2: Generate Traffic and Verify Metrics Appear**
+## Metrics Flow Explanation:
+
+**🔄 Step 2: Metrics Generation**
+- Istio sidecars (Envoy proxies) automatically generate metrics for incoming/outgoing requests
+- Metrics are exposed at `:15000/stats/prometheus` endpoint on each pod
+- We verify this by sending traffic TO netshoot and checking its metrics
+
+**📊 Step 3: Metrics Collection**  
+- Azure Monitor Managed Prometheus (AMA-Metrics pods) scrape Envoy endpoints
+- Uses Kubernetes service discovery to find Istio-enabled pods
+- Configured via `ama-metrics-prometheus-config` ConfigMap
+
+**🗄️ Step 4: Metrics Storage**
+- Scraped metrics are stored in Azure Monitor Workspace (AMW)
+- AMW provides Prometheus-compatible storage and query API
+- Accessible via REST API with Azure authentication
+
+**📈 Step 5: Metrics Visualization**
+- Azure Managed Grafana (AMG) queries AMW as data source
+- Pre-built Istio dashboards show service topology, request rates, latencies
+- Provides interactive visualization and alerting capabilities
+
+### Step 2: Verify Istio Proxy Metrics Generation
+
+**Understanding Istio Metrics:**
+
+The `istio_requests_total` metric counts incoming requests TO a pod with Istio sidecar. To generate these metrics, we need to send traffic TO the netshoot pod (not from it).
+
+**Step 2.1: Create Netshoot Pod with Istio Sidecar**
 
 ```bash
-# Get the ingress IP
-export INGRESS_IP=$(kubectl get svc -n aks-istio-ingress aks-istio-ingressgateway-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "Ingress IP: $INGRESS_IP"
+# ensure default ns is labelled with istio.io/rev=asm-1-25
+k get ns default --show-labels
+# Create netshoot pod in default namespace (which should have Istio injection enabled)
+kubectl run netshoot --image=nicolaka/netshoot -- sh -c 'sleep 3600'
 
-# Generate traffic to create request metrics
-for i in {1..10}; do
-  curl -s "http://$INGRESS_IP/productpage" > /dev/null
-  echo "Request $i sent"
-  sleep 1
-done
+# Wait for pod to be ready (should show 2/2 containers - app + istio-proxy)
+kubectl wait --for=condition=Ready pod/netshoot --timeout=60s
 
+# Verify Istio sidecar is injected
+kubectl get pod netshoot
+# Expected result: Should show READY 2/2 (app container + istio-proxy sidecar)
+```
 
+**Step 2.2: Initial Metrics Check (Should Show Zero)**
+
+```bash
+# Check current metrics - should be 0 initially since no traffic has been sent TO the pod
+kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
+# Expected result: 0 (no incoming requests yet)
+```
+
+**Step 2.3: Set Up HTTP Server and Service**
+
+```bash
+# Create a service to expose the netshoot pod
+kubectl expose pod netshoot --port=8080 --target-port=8080 --name=netshoot-service
+
+# Start a simple HTTP server inside the netshoot pod
+kubectl exec netshoot -- sh -c 'nohup python3 -m http.server 8080 > /dev/null 2>&1 &'
+
+# Verify the HTTP server is running
+kubectl exec netshoot -- netstat -tlnp | grep 8080
+# Expected result: Should show python3 listening on port 8080
+```
+
+**Step 2.4: Create Client Pod**
+
+```bash
+# Create a client pod to send requests TO the netshoot service
+kubectl run client --image=nicolaka/netshoot -- sh -c 'sleep 3600'
+
+# Wait for client pod to be ready
+kubectl wait --for=condition=Ready pod/client --timeout=60s
+```
+
+**Step 2.5: Generate Traffic and Verify Metrics**
+
+```bash
+# Send a test request to verify connectivity
+kubectl exec client -- curl -s http://netshoot-service:8080/ | head -5
+# Expected result: Should show HTML directory listing
+
+# Generate multiple requests to increase the metrics counter
+kubectl exec client -- sh -c 'for i in $(seq 1 10); do curl -s http://netshoot-service:8080/ > /dev/null; echo "Request $i sent"; done'
+```
+
+**Step 2.6: Verify Istio Metrics Are Generated**
+
+```bash
+# Check that istio_requests_total metrics now exist
+kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
+# Expected result: Should show 2 (instead of 0) - indicating metrics are being generated
+
+# View the actual metrics with request counts
+kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total
+# Expected result: Should show metrics with counter values like "istio_requests_total{...} 11"
+```
+
+**Step 2.7: Continue Generating Traffic (Optional)**
+
+```bash
+# Send more requests to see the counter increase
+kubectl exec client -- sh -c 'for i in $(seq 1 20); do curl -s http://netshoot-service:8080/ > /dev/null; echo -n "."; done; echo " Done!"'
+
+# Check updated counter - should show increased values
+kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | grep -o 'istio_requests_total{.*} [0-9]*$'
+# Expected result: Counter should show 31 (11 from previous step + 20 new requests)
+```
+
+**Expected Result**: The `istio_requests_total` counter should now show increasing values as traffic is sent to the netshoot service. Each request increments the counter, demonstrating that Istio is properly collecting metrics for incoming requests.
 
 ### Step 3: Verify Azure Monitor Metrics Scraping
 
@@ -648,7 +858,7 @@ curl --parallel --parallel-immediate --parallel-max 5 $(printf "http://$INGRESS_
 ```bash
 # 1. Istio Proxy Metrics Generation ✓
 echo "Step 1: Checking Istio proxy metrics..."
-kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
+kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
 
 # 2. Azure Monitor Scraping ✓ 
 echo "Step 2: Checking Azure Monitor scraping..."
@@ -934,27 +1144,101 @@ Kiali is a service mesh observability console that provides visualization and ma
 
 Kiali can be configured to use Azure Monitor Managed Prometheus as its data source, providing seamless integration with your existing monitoring infrastructure.
 
+View repo:  https://github.com/Azure/AKS/tree/master/examples/istio-based-service-mesh/observability/kiali  
+
+Use "Option 2: Azure Monitor Managed Prometheus"
+
 ```bash
 # Navigate to a temporary directory
 cd /tmp
 
-# Clone the Azure AKS examples repository
+# Optionally clone the Azure AKS examples repository
 git clone https://github.com/Azure/AKS.git
 cd AKS/examples/istio-based-service-mesh/observability/kiali
 
-# Review the Kiali configuration
-cat kiali.yaml
+ 
 ```
 
 **Configure Kiali for Azure Monitor integration:**
 
 ```bash
-# Apply Kiali configuration
-kubectl apply -f kiali.yaml
+# Add Kiali Helm repository
+helm repo add kiali https://kiali.org/helm-charts
+helm repo update
 
-# Verify Kiali deployment
-kubectl get pods -n aks-istio-system | grep kiali
-kubectl get svc -n aks-istio-system | grep kiali
+# Install Kiali Operator
+helm upgrade --install \
+    --namespace kiali-operator \
+    --create-namespace \
+    kiali-operator \
+    kiali/kiali-operator
+
+# Wait for operator to be ready
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kiali-operator -n kiali-operator --timeout=300s
+
+
+# Deploy AAD Authentication Proxy - Create the namespace first
+kubectl create namespace aad-auth-proxy-ns
+# Deploy AAD auth proxy using the template file
+envsubst < aad-auth-proxy-template.yaml | kubectl apply -f -
+
+# Configure Azure RBAC  - Grant Monitoring Data Reader role to the managed identity
+export CLIENT_ID=$(az aks show -g $RESOURCE_GROUP -n $CLUSTER --query identityProfile.kubeletidentity.clientId -o tsv)
+
+az role assignment create \
+    --assignee $CLIENT_ID \
+    --role "Monitoring Data Reader" \
+    --scope $amwrid
+
+# Verify role assignment
+az role assignment list --assignee $CLIENT_ID --scope $amwrid
+
+
+# Validate AAD Auth Proxy Connection to Azure Monitor - Open a new terminal 
+kubectl port-forward -n aad-auth-proxy-ns svc/aad-auth-proxy 8082:80  
+
+# try this in a different terminal 
+curl -s "http://localhost:8082/api/v1/query?query=up" | jq '.'
+
+
+# Deploy Kiali Custom Resource
+envsubst < kiali-cr.yaml | kubectl apply -f -
+
+# Create External Service for Kiali
+kubectl apply -f kiali-external-service.yaml -n aks-istio-system
+
+# Create Service Account for Authentication
+# Create service account
+kubectl create serviceaccount kiali-dashboard -n aks-istio-system
+
+# Create cluster role binding using the Kiali-provided viewer role
+kubectl create clusterrolebinding kiali-dashboard \
+    --clusterrole=kiali-viewer \
+    --serviceaccount=aks-istio-system:kiali-dashboard
+
+# Generate access token (valid for 24 hours)
+TOKEN=$(kubectl create token kiali-dashboard -n aks-istio-system --duration=24h)
+echo "Kiali Access Token: $TOKEN"
+
+# # Get external IP and display access information
+EXTERNAL_IP=$(kubectl get service kiali-external -n aks-istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo ""
+echo "=== Kiali Access Information ==="
+echo "URL: http://$EXTERNAL_IP:20001"
+echo "Authentication: Select 'Token'"
+echo "Token: $TOKEN"
+echo ""
+echo "Copy the token above and use it to log into Kiali"
+
+
+# Generate Traffic for Visualization
+
+for i in {1..100}; do 
+  curl -s "http://$EXTERNAL_IP/productpage" > /dev/null
+  sleep 0.2
+done
+
 ```
 
 **Expected Result**: Kiali pod should be running and service should be available.
@@ -964,11 +1248,17 @@ kubectl get svc -n aks-istio-system | grep kiali
 **Option A: Using kubectl port-forward**
 
 ```bash
+# Check Kiali authentication configuration
+kubectl get configmap kiali -n aks-istio-system -o yaml | grep -A 5 "require_auth"
+
+# Good news: This Kiali instance has require_auth: false, meaning authentication is optional!
+
 # Forward Kiali port to local machine
 kubectl port-forward svc/kiali -n aks-istio-system 20001:20001
 
 # Open browser to http://localhost:20001
-# You should see the Kiali dashboard with service topology
+# You should be able to access Kiali without authentication (anonymous access)
+# If prompted for login, try clicking "Skip" or look for anonymous access option
 ```
 
 **Option B: Using istioctl dashboard (if available)**
@@ -976,6 +1266,58 @@ kubectl port-forward svc/kiali -n aks-istio-system 20001:20001
 ```bash
 # Open Kiali dashboard directly
 istioctl dashboard kiali -n aks-istio-system
+```
+
+**Troubleshooting Kiali Access:**
+
+Since this Kiali instance has `require_auth: false`, you should be able to access it without authentication:
+
+```bash
+# Verify Kiali is running
+kubectl get pods -n aks-istio-system | grep kiali
+
+# Check Kiali service
+kubectl get svc kiali -n aks-istio-system
+
+# If you still see authentication prompts, try these solutions:
+
+# Solution 1: Use kubectl proxy (bypasses authentication entirely)
+kubectl proxy --port=8001 &
+# Then access: http://localhost:8001/api/v1/namespaces/aks-istio-system/services/kiali:20001/proxy/
+
+# Solution 2: Check for any authentication errors in Kiali logs
+kubectl logs deployment/kiali -n aks-istio-system --tail=20
+
+# Solution 3: Restart Kiali if needed
+kubectl rollout restart deployment/kiali -n aks-istio-system
+
+# Solution 4: Access via LoadBalancer (if available)
+kubectl get svc kiali -n aks-istio-system -o wide
+```
+
+**Alternative Authentication (if needed):**
+
+If you do encounter authentication requirements:
+
+```bash
+# Create a service account token
+export KIALI_TOKEN=$(kubectl create token kiali-service-account -n aks-istio-system --duration=24h)
+echo "Token: $KIALI_TOKEN"
+
+# Or use your current kubectl context
+export KIALI_TOKEN=$(kubectl config view --raw -o jsonpath='{.users[0].user.token}')
+```
+
+**Alternative Access Methods:**
+
+```bash
+# Method A: Use kubectl proxy for authentication bypass
+kubectl proxy --port=8001 &
+# Then access: http://localhost:8001/api/v1/namespaces/aks-istio-system/services/kiali:20001/proxy/
+
+# Method B: If using Azure AKS, try with Azure CLI authentication
+az aks get-credentials --resource-group aksistio4rg --name aksistio4
+export KIALI_TOKEN=$(az account get-access-token --query accessToken -o tsv)
 ```
 
 ### Step 3: Explore Service Topology
