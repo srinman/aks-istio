@@ -1243,57 +1243,6 @@ done
 
 **Expected Result**: Kiali pod should be running and service should be available.
 
-### Step 2: Access Kiali Dashboard
-
-**Option A: Using kubectl port-forward**
-
-```bash
-# Check Kiali authentication configuration
-kubectl get configmap kiali -n aks-istio-system -o yaml | grep -A 5 "require_auth"
-
-# Good news: This Kiali instance has require_auth: false, meaning authentication is optional!
-
-# Forward Kiali port to local machine
-kubectl port-forward svc/kiali -n aks-istio-system 20001:20001
-
-# Open browser to http://localhost:20001
-# You should be able to access Kiali without authentication (anonymous access)
-# If prompted for login, try clicking "Skip" or look for anonymous access option
-```
-
-**Option B: Using istioctl dashboard (if available)**
-
-```bash
-# Open Kiali dashboard directly
-istioctl dashboard kiali -n aks-istio-system
-```
-
-**Troubleshooting Kiali Access:**
-
-Since this Kiali instance has `require_auth: false`, you should be able to access it without authentication:
-
-```bash
-# Verify Kiali is running
-kubectl get pods -n aks-istio-system | grep kiali
-
-# Check Kiali service
-kubectl get svc kiali -n aks-istio-system
-
-# If you still see authentication prompts, try these solutions:
-
-# Solution 1: Use kubectl proxy (bypasses authentication entirely)
-kubectl proxy --port=8001 &
-# Then access: http://localhost:8001/api/v1/namespaces/aks-istio-system/services/kiali:20001/proxy/
-
-# Solution 2: Check for any authentication errors in Kiali logs
-kubectl logs deployment/kiali -n aks-istio-system --tail=20
-
-# Solution 3: Restart Kiali if needed
-kubectl rollout restart deployment/kiali -n aks-istio-system
-
-# Solution 4: Access via LoadBalancer (if available)
-kubectl get svc kiali -n aks-istio-system -o wide
-```
 
 **Alternative Authentication (if needed):**
 
@@ -1323,7 +1272,7 @@ export KIALI_TOKEN=$(az account get-access-token --query accessToken -o tsv)
 ### Step 3: Explore Service Topology
 
 **Generate traffic to visualize service interactions:**
-
+s
 ```bash
 # Generate traffic to bookinfo application
 export INGRESS_IP=$(kubectl get svc -n aks-istio-ingress aks-istio-ingressgateway-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
@@ -1348,6 +1297,7 @@ done
 - Traffic flow with request rates and response times
 - Health indicators for each service
 
+![alt text](image-1.png)
 ---
 
 ## Lab Exercise 5: Distributed Tracing with Jaeger
@@ -1418,6 +1368,52 @@ kubectl get svc -n aks-istio-system | grep zipkin
 
 ### Step 3: Test Local Tracing (Without Gateway)
 
+kubectl create serviceaccount httpbin -n testns2
+
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: httpbin
+  namespace: testns
+  labels:
+    app: httpbin
+    service: httpbin
+spec:
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8080
+  selector:
+    app: httpbin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpbin
+  namespace: testns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: httpbin
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: httpbin
+        version: v1
+    spec:
+      containers:
+      - image: docker.io/mccutchen/go-httpbin:v2.15.0
+        imagePullPolicy: IfNotPresent
+        name: httpbin
+        ports:
+        - containerPort: 8080
+EOF
+```
 **Set up port forwarding to test httpbin directly:**
 
 ```bash
