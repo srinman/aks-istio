@@ -88,9 +88,6 @@ export RESOURCE_GROUP="aksistio4rg"
 export INFRA_RG="infrarg"
 export AMW_NAME="amwforaks"
 export AMG_NAME="amgforaks"
-export CLUSTER=aksistio4
-export RESOURCE_GROUP=aksistio4rg
-export LOCATION=eastus2
 
 # Verify Azure resources exist
 echo "Verifying Azure resources..."
@@ -187,8 +184,6 @@ Istio automatically generates metrics for:
 **Deploy the Bookinfo application for comprehensive metrics testing:**
 
 ```bash
-# check revision and use it for labelling namespace below
-az aks show --name ${CLUSTER} --resource-group ${RESOURCE_GROUP} --query 'serviceMeshProfile'
 # Create and label namespace
 kubectl create namespace bookinfo
 kubectl label namespace bookinfo istio.io/rev=asm-1-25
@@ -253,50 +248,7 @@ spec:
 EOF
 ```
 
-```bash
-# ensure that only bookinfo-gateway is listed - delete other gateway resources if any 
-kubectl get gateway -A 
-
-istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-25
-# Expected output below!
-#ADDRESSES PORT  MATCH DESTINATION
-#0.0.0.0   80    ALL   Route: http.80
-#0.0.0.0   15021 ALL   Inline Route: /healthz/ready*
-#0.0.0.0   15090 ALL   Inline Route: /stats/prometheus*
-
-
-
-istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25
-# Expected output below!
-#NAME        VHOST NAME     DOMAINS     MATCH                  VIRTUAL SERVICE
-#http.80     *:80           *           /productpage           bookinfo.bookinfo
-#http.80     *:80           *           /static*               bookinfo.bookinfo
-#http.80     *:80           *           /login                 bookinfo.bookinfo
-#http.80     *:80           *           /logout                bookinfo.bookinfo
-#http.80     *:80           *           /api/v1/products*      bookinfo.bookinfo
-#            backend        *           /stats/prometheus*     
-#            backend        *           /healthz/ready* 
-
-
-# Try to access the external IP (should get 404 - no routes configured yet)
-EXTERNAL_IP=$(kubectl get svc aks-istio-ingressgateway-external -n aks-istio-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "External IP: $EXTERNAL_IP"
-
-curl -v http://$EXTERNAL_IP/productpage
-# expected result:  curl is able to get page content
-
-```
-
 ### Step 1.5: Configure Azure Monitor Managed Prometheus for Istio Metrics
-
-Reference documentation:  
-https://learn.microsoft.com/en-us/azure/azure-monitor/containers/kubernetes-monitoring-enable?tabs=cli  
-
-Terminology: 
-Workspace - place to store metrics or logs
-Azure Managed Workspace -  It's a managed Prometheus and a place to store prometheus metrics
-Log Analytics Workspace -  It's a managed logging solution and a place to store container logs and also control plane logs  
-Azure Managed Grafana Workspace - It's a managed Grafana to make the Prometheus metrics collected from your cluster available via Grafana dashboards
 
 Before verifying Istio proxy metrics, we need to configure Azure Monitor Managed Prometheus to properly scrape Istio metrics. This requires creating specific configmaps in the `kube-system` namespace.
 
@@ -308,7 +260,7 @@ Azure Monitor Managed Prometheus supports four different configmaps that provide
 
 | ConfigMap Name | Purpose | Scope | AMA Pod Reading It | Use Case |
 |---|---|---|---|---|
-| **ama-metrics-settings-configmap**   https://aka.ms/azureprometheus-addon-settings-configmap  | General addon settings and configuration | Cluster-wide | **All AMA pods**<br>- `ama-metrics-*` (replica)<br>- `ama-metrics-node-*` (DaemonSet)<br>- `ama-metrics-ksm-*` (kube-state-metrics)<br>- `ama-metrics-operator-targets-*` | - Enable/disable default scrape targets<br>- Configure pod annotation-based scraping<br>- Set metric keep-lists and scrape intervals<br>- Control cluster alias and debug mode |
+| **ama-metrics-settings-configmap** | General addon settings and configuration | Cluster-wide | **All AMA pods**<br>- `ama-metrics-*` (replica)<br>- `ama-metrics-node-*` (DaemonSet)<br>- `ama-metrics-ksm-*` (kube-state-metrics)<br>- `ama-metrics-operator-targets-*` | - Enable/disable default scrape targets<br>- Configure pod annotation-based scraping<br>- Set metric keep-lists and scrape intervals<br>- Control cluster alias and debug mode |
 | **ama-metrics-prometheus-config** | Custom Prometheus scrape jobs for cluster-level services | Replica (singleton) | **`ama-metrics-*` (replica pod only)**<br>- Handles cluster-wide targets<br>- Runs as single instance | - Add custom scrape jobs for any services<br>- **✅ Sufficient for Istio metrics collection**<br>- Configure service discovery and relabeling<br>- Scrape both mesh and proxy metrics |
 | **ama-metrics-prometheus-config-node** | Custom Prometheus scrape jobs for node-level targets | DaemonSet (per Linux node) | **`ama-metrics-node-*` (DaemonSet pods only)**<br>- One pod per Linux node<br>- Access to `$NODE_IP` variable | - Scrape node-specific services<br>- Access services using `$NODE_IP` variable<br>- Collect per-node metrics |
 | **ama-metrics-prometheus-config-node-windows** | Custom Prometheus scrape jobs for Windows node-level targets | DaemonSet (per Windows node) | **`ama-metrics-node-windows-*` (Windows DaemonSet pods only)**<br>- One pod per Windows node<br>- Access to `$NODE_IP` variable | - Scrape Windows node-specific services<br>- Access services using `$NODE_IP` variable<br>- Collect per-Windows-node metrics |
@@ -379,10 +331,10 @@ EOF
 
 **Step 1.5.2: Create Custom Prometheus Scrape Configuration**
 
-Create a custom scrape configuration to collect Istio-specific metrics:
+Create a custom scrape configuration to collect both data plane and control plane Istio metrics:
 
 ```bash
-# Create prometheus scrape config for Istio metrics
+# Create prometheus scrape config for complete Istio metrics collection
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -394,46 +346,14 @@ data:
     global:
       scrape_interval: 30s
     scrape_configs:
-    - job_name: 'istio-mesh'
-      kubernetes_sd_configs:
-      - role: endpoints
-        namespaces:
-          names:
-          - istio-system
-          - aks-istio-ingress
-          - bookinfo
-      relabel_configs:
-      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
-        action: keep
-        regex: istio-proxy;http-monitoring
-      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
-        action: keep
-        regex: true
-      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
-        action: replace
-        target_label: __metrics_path__
-        regex: (.+)
-      - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
-        action: replace
-        regex: ([^:]+)(?::\d+)?;(\d+)
-        replacement: \$1:\$2
-        target_label: __address__
-      - action: labelmap
-        regex: __meta_kubernetes_service_label_(.+)
-      - source_labels: [__meta_kubernetes_namespace]
-        action: replace
-        target_label: kubernetes_namespace
-      - source_labels: [__meta_kubernetes_service_name]
-        action: replace
-        target_label: kubernetes_name
-    
+    # Data plane: Istio proxy sidecars
     - job_name: 'istio-proxy'
       kubernetes_sd_configs:
       - role: pod
         namespaces:
           names:
-          - istio-system
-          - aks-istio-ingress
+          - aks-istio-system
+          - aks-istio-ingress  
           - bookinfo
       relabel_configs:
       - source_labels: [__meta_kubernetes_pod_container_name]
@@ -462,6 +382,43 @@ data:
       metric_relabel_configs:
       - source_labels: [__name__]
         regex: 'istio_.*'
+        action: keep
+    
+    # Control plane: Istiod (XDS pushes, events, pilot metrics)
+    - job_name: 'istio-control-plane'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+          - aks-istio-system
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        action: keep
+        regex: discovery
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+        replacement: /stats/prometheus
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: \$1:15014
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'pilot_.*|galley_.*|citadel_.*|mixer_.*|process_.*|go_.*'
         action: keep
 EOF
 ```
@@ -508,198 +465,36 @@ The AMA-Metrics pods will automatically:
 2. Restart in 2-3 minutes to apply the new configuration
 3. Begin scraping metrics according to the new settings
 
-## Istio Metrics Architecture Overview
-
-Before diving into the verification steps, let's understand how Istio metrics flow from generation to visualization:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           AKS Cluster with Istio Service Mesh                  │
-│                                                                                 │
-│  ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐  │
-│  │   Pod: netshoot     │    │   Pod: client       │    │   Pod: productpage  │  │
-│  │  ┌───────────────┐  │    │  ┌───────────────┐  │    │  ┌───────────────┐  │  │
-│  │  │ netshoot      │  │    │  │ netshoot      │  │    │  │ productpage   │  │  │
-│  │  │ container     │  │    │  │ container     │  │    │  │ container     │  │  │
-│  │  └───────────────┘  │    │  └───────────────┘  │    │  └───────────────┘  │  │
-│  │  ┌───────────────┐  │    │  ┌───────────────┐  │    │  ┌───────────────┐  │  │
-│  │  │ istio-proxy   │◄─┼────┼──┤ istio-proxy   │    │    │  │ istio-proxy   │  │  │
-│  │  │ (Envoy)       │  │    │  │ (Envoy)       │    │    │  │ (Envoy)       │  │  │
-│  │  │ :15000/stats/ │  │    │  │ :15000/stats/ │    │    │  │ :15000/stats/ │  │  │
-│  │  │ prometheus    │  │    │  │ prometheus    │    │    │  │ prometheus    │  │  │
-│  │  └───────────────┘  │    │  └───────────────┘  │    │  └───────────────┘  │  │
-│  └─────────────────────┘    └─────────────────────┘    └─────────────────────┘  │
-│           ▲                           │                           ▲             │
-│           │ [Step 2]                  │ HTTP Request              │             │
-│           │ Verify metrics            │ TO netshoot               │             │
-│           │ generation                │ service                   │             │
-│           │                           ▼                           │             │
-│  ┌─────────────────────┐    ┌─────────────────────┐              │             │
-│  │ AMA-Metrics Pods    │    │   Kubernetes        │              │             │
-│  │ (Azure Monitor      │    │   Service           │              │             │
-│  │ Managed Prometheus) │    │   Discovery         │              │             │
-│  │                     │    │                     │              │             │
-│  │ ┌─────────────────┐ │    │ ┌─────────────────┐ │              │             │
-│  │ │ ama-metrics-*   │ │    │ │ netshoot-svc    │ │              │             │
-│  │ │ (replica)       │ │    │ │ :8080           │ │              │             │
-│  │ │                 │ │    │ └─────────────────┘ │              │             │
-│  │ │ Scrapes :15000/ │ │    └─────────────────────┘              │             │
-│  │ │ stats/prometheus│ │                                         │             │
-│  │ └─────────────────┘ │                                         │             │
-│  └─────────────────────┘                                         │             │
-│           │ [Step 3]                                              │             │
-│           │ Verify scraping                                       │             │
-│           │                                                       │             │
-│           ▼                                                       │             │
-└─────────────────────────────────────────────────────────────────────────────────┘
-            │                                                       │
-            │ [Step 4]                                              │
-            │ Verify metrics in AMW                                 │
-            │                                                       │
-            ▼                                                       │
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                     Azure Monitor Workspace (AMW)                              │
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                 Managed Prometheus Storage                              │    │
-│  │                                                                         │    │
-│  │  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐          │    │
-│  │  │ istio_requests_ │ │ istio_request_  │ │ up              │          │    │
-│  │  │ total           │ │ duration_ms     │ │                 │          │    │
-│  │  │ {labels...} 31  │ │ {labels...}     │ │ {labels...} 1   │          │    │
-│  │  └─────────────────┘ └─────────────────┘ └─────────────────┘          │    │
-│  └─────────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────────┘
-            │ [Step 5]
-            │ Verify metrics in AMG
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                     Azure Managed Grafana (AMG)                                │
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                        Grafana Dashboards                               │    │
-│  │                                                                         │    │
-│  │  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐          │    │
-│  │  │ Istio Service   │ │ Istio Workload  │ │ Request Rate    │          │    │
-│  │  │ Dashboard       │ │ Dashboard       │ │ Graph           │          │    │
-│  │  │ (ID: 7636)      │ │ (ID: 7630)      │ │                 │          │    │
-│  │  └─────────────────┘ └─────────────────┘ └─────────────────┘          │    │
-│  └─────────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Metrics Flow Explanation:
-
-**🔄 Step 2: Metrics Generation**
-- Istio sidecars (Envoy proxies) automatically generate metrics for incoming/outgoing requests
-- Metrics are exposed at `:15000/stats/prometheus` endpoint on each pod
-- We verify this by sending traffic TO netshoot and checking its metrics
-
-**📊 Step 3: Metrics Collection**  
-- Azure Monitor Managed Prometheus (AMA-Metrics pods) scrape Envoy endpoints
-- Uses Kubernetes service discovery to find Istio-enabled pods
-- Configured via `ama-metrics-prometheus-config` ConfigMap
-
-**🗄️ Step 4: Metrics Storage**
-- Scraped metrics are stored in Azure Monitor Workspace (AMW)
-- AMW provides Prometheus-compatible storage and query API
-- Accessible via REST API with Azure authentication
-
-**📈 Step 5: Metrics Visualization**
-- Azure Managed Grafana (AMG) queries AMW as data source
-- Pre-built Istio dashboards show service topology, request rates, latencies
-- Provides interactive visualization and alerting capabilities
-
 ### Step 2: Verify Istio Proxy Metrics Generation
 
-**Understanding Istio Metrics:**
-
-The `istio_requests_total` metric counts incoming requests TO a pod with Istio sidecar. To generate these metrics, we need to send traffic TO the netshoot pod (not from it).
-
-**Step 2.1: Create Netshoot Pod with Istio Sidecar**
+**Step 2.1: Check Basic Envoy Admin Interface**
 
 ```bash
-# ensure default ns is labelled with istio.io/rev=asm-1-25
-k get ns default --show-labels
-# Create netshoot pod in default namespace (which should have Istio injection enabled)
-kubectl run netshoot --image=nicolaka/netshoot -- sh -c 'sleep 3600'
+# Check if Envoy admin interface is accessible
+kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- pilot-agent request GET /ready
 
-# Wait for pod to be ready (should show 2/2 containers - app + istio-proxy)
-kubectl wait --for=condition=Ready pod/netshoot --timeout=60s
+# Check basic stats endpoint
+kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- pilot-agent request GET /stats | head -10
 
-# Verify Istio sidecar is injected
-kubectl get pod netshoot
-# Expected result: Should show READY 2/2 (app container + istio-proxy sidecar)
+# Check Prometheus metrics endpoint
+kubectl -n bookinfo exec deployment/productpage-v1 -c istio-proxy -- pilot-agent request GET /stats/prometheus | head -10
 ```
 
-**Step 2.2: Initial Metrics Check (Should Show Zero)**
+**Step 2.2: Generate Traffic and Verify Metrics Appear**
 
 ```bash
-# Check current metrics - should be 0 initially since no traffic has been sent TO the pod
-kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
-# Expected result: 0 (no incoming requests yet)
-```
+# Get the ingress IP
+export INGRESS_IP=$(kubectl get svc -n aks-istio-ingress aks-istio-ingressgateway-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "Ingress IP: $INGRESS_IP"
 
-**Step 2.3: Set Up HTTP Server and Service**
+# Generate traffic to create request metrics
+for i in {1..10}; do
+  curl -s "http://$INGRESS_IP/productpage" > /dev/null
+  echo "Request $i sent"
+  sleep 1
+done
 
-```bash
-# Create a service to expose the netshoot pod
-kubectl expose pod netshoot --port=8080 --target-port=8080 --name=netshoot-service
 
-# Start a simple HTTP server inside the netshoot pod
-kubectl exec netshoot -- sh -c 'nohup python3 -m http.server 8080 > /dev/null 2>&1 &'
-
-# Verify the HTTP server is running
-kubectl exec netshoot -- netstat -tlnp | grep 8080
-# Expected result: Should show python3 listening on port 8080
-```
-
-**Step 2.4: Create Client Pod**
-
-```bash
-# Create a client pod to send requests TO the netshoot service
-kubectl run client --image=nicolaka/netshoot -- sh -c 'sleep 3600'
-
-# Wait for client pod to be ready
-kubectl wait --for=condition=Ready pod/client --timeout=60s
-```
-
-**Step 2.5: Generate Traffic and Verify Metrics**
-
-```bash
-# Send a test request to verify connectivity
-kubectl exec client -- curl -s http://netshoot-service:8080/ | head -5
-# Expected result: Should show HTML directory listing
-
-# Generate multiple requests to increase the metrics counter
-kubectl exec client -- sh -c 'for i in $(seq 1 10); do curl -s http://netshoot-service:8080/ > /dev/null; echo "Request $i sent"; done'
-```
-
-**Step 2.6: Verify Istio Metrics Are Generated**
-
-```bash
-# Check that istio_requests_total metrics now exist
-kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
-# Expected result: Should show 2 (instead of 0) - indicating metrics are being generated
-
-# View the actual metrics with request counts
-kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total
-# Expected result: Should show metrics with counter values like "istio_requests_total{...} 11"
-```
-
-**Step 2.7: Continue Generating Traffic (Optional)**
-
-```bash
-# Send more requests to see the counter increase
-kubectl exec client -- sh -c 'for i in $(seq 1 20); do curl -s http://netshoot-service:8080/ > /dev/null; echo -n "."; done; echo " Done!"'
-
-# Check updated counter - should show increased values
-kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | grep -o 'istio_requests_total{.*} [0-9]*$'
-# Expected result: Counter should show 31 (11 from previous step + 20 new requests)
-```
-
-**Expected Result**: The `istio_requests_total` counter should now show increasing values as traffic is sent to the netshoot service. Each request increments the counter, demonstrating that Istio is properly collecting metrics for incoming requests.
 
 ### Step 3: Verify Azure Monitor Metrics Scraping
 
@@ -851,14 +646,293 @@ curl --parallel --parallel-immediate --parallel-max 5 $(printf "http://$INGRESS_
 # - sum(rate(istio_requests_total[5m])) by (destination_service_name)
 ```
 
-### Step 6: Complete Pipeline Validation
+### Step 6: Generate XDS Events and Control Plane Activity
+
+To populate the Istio Control Plane dashboard with meaningful data, you need to generate XDS pushes, service discovery events, and configuration changes. Here are various methods:
+
+#### Method 1: Configuration Change Loop (Generates XDS Pushes)
+
+```bash
+# Create multiple DestinationRules to trigger XDS pushes
+for i in {1..10}; do
+  echo "Creating DestinationRule $i to trigger XDS pushes..."
+  kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: xds-test-$i
+  namespace: default
+spec:
+  host: test-service-$i.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: $((i * 10))
+      http:
+        http1MaxPendingRequests: $((i * 5))
+        maxRequestsPerConnection: $((i * 2))
+EOF
+  sleep 2
+done
+```
+
+#### Method 2: VirtualService Changes (Generates Route Updates)
+
+```bash
+# Create and modify VirtualServices to generate route configuration pushes
+for i in {1..5}; do
+  echo "Creating VirtualService $i..."
+  kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: route-test-$i
+  namespace: default
+spec:
+  hosts:
+  - test-app-$i.local
+  http:
+  - match:
+    - headers:
+        test-header:
+          exact: value-$i
+    route:
+    - destination:
+        host: test-service-$i.local
+        port:
+          number: 80
+      weight: $((50 + i * 10))
+    - destination:
+        host: test-service-$((i+1)).local
+        port:
+          number: 80
+      weight: $((50 - i * 10))
+EOF
+  sleep 3
+done
+```
+
+#### Method 3: Service Discovery Events (Pod Creation/Deletion)
+
+```bash
+# Create temporary pods to generate service discovery events
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xds-event-generator
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: xds-generator
+  template:
+    metadata:
+      labels:
+        app: xds-generator
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: xds-generator-service
+  namespace: default
+spec:
+  selector:
+    app: xds-generator
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+
+# Scale up and down to generate events
+echo "Scaling deployment to generate service discovery events..."
+for i in {1..5}; do
+  kubectl scale deployment xds-event-generator --replicas=$((i * 2))
+  sleep 10
+  kubectl scale deployment xds-event-generator --replicas=$i
+  sleep 10
+done
+```
+
+#### Method 4: Security Policy Changes (Generates Security Configuration Pushes)
+
+```bash
+# Create AuthorizationPolicies to trigger security configuration pushes
+for i in {1..5}; do
+  echo "Creating AuthorizationPolicy $i..."
+  kubectl apply -f - <<EOF
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: auth-test-$i
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: xds-generator
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/default/sa/test-sa-$i"]
+  - to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/api/v$i/*"]
+EOF
+  sleep 2
+done
+```
+
+#### Method 5: Continuous Monitoring and Activity Generation
+
+Create a script to continuously generate activity:
+
+```bash
+# Create continuous activity generator
+cat > generate-xds-activity.sh <<'EOF'
+#!/bin/bash
+
+echo "Starting continuous XDS activity generation..."
+counter=1
+
+while true; do
+  echo "Activity cycle $counter..."
+  
+  # Create a DestinationRule
+  kubectl apply -f - <<YAML
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: activity-dr-$counter
+  namespace: default
+spec:
+  host: activity-service-$counter.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: $((counter % 100 + 10))
+YAML
+  
+  sleep 5
+  
+  # Delete it to trigger cleanup
+  kubectl delete destinationrule activity-dr-$counter -n default --ignore-not-found=true
+  
+  # Create ServiceEntry for external service discovery
+  kubectl apply -f - <<YAML
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: external-service-$counter
+  namespace: default
+spec:
+  hosts:
+  - external-api-$counter.example.com
+  ports:
+  - number: 443
+    name: https
+    protocol: HTTPS
+  location: MESH_EXTERNAL
+  resolution: DNS
+YAML
+  
+  sleep 5
+  
+  # Delete ServiceEntry
+  kubectl delete serviceentry external-service-$counter -n default --ignore-not-found=true
+  
+  counter=$((counter + 1))
+  sleep 10
+done
+EOF
+
+chmod +x generate-xds-activity.sh
+
+# Run in background
+./generate-xds-activity.sh &
+ACTIVITY_PID=$!
+echo "Activity generator started with PID: $ACTIVITY_PID"
+echo "To stop: kill $ACTIVITY_PID"
+```
+
+#### Method 6: Monitor XDS Metrics in Real-Time
+
+```bash
+# Monitor control plane metrics directly
+echo "Setting up port-forward to istiod for real-time monitoring..."
+kubectl port-forward -n aks-istio-system svc/istiod 15014:15014 &
+PORT_FORWARD_PID=$!
+
+# Check XDS push metrics
+echo "Checking XDS push metrics..."
+curl -s localhost:15014/stats/prometheus | grep -E "pilot_xds_pushes_total|pilot_xds_push_time|pilot_services"
+
+# Monitor continuously
+echo "Starting real-time XDS monitoring (Ctrl+C to stop)..."
+while true; do
+  echo "=== $(date) ==="
+  curl -s localhost:15014/stats/prometheus | grep -E "pilot_xds_pushes_total|pilot_xds_push_time|pilot_services" | head -10
+  echo ""
+  sleep 10
+done
+
+# Cleanup when done
+kill $PORT_FORWARD_PID
+```
+
+#### Cleanup Commands
+
+```bash
+# Clean up test resources
+echo "Cleaning up XDS test resources..."
+
+# Remove DestinationRules
+kubectl delete destinationrules --all -n default --selector='!app'
+
+# Remove VirtualServices  
+kubectl delete virtualservices --all -n default --selector='!app'
+
+# Remove AuthorizationPolicies
+for i in {1..5}; do
+  kubectl delete authorizationpolicy auth-test-$i -n default --ignore-not-found=true
+done
+
+# Remove test deployment
+kubectl delete deployment xds-event-generator -n default --ignore-not-found=true
+kubectl delete service xds-generator-service -n default --ignore-not-found=true
+
+# Stop activity generator if running
+pkill -f "generate-xds-activity.sh"
+
+echo "Cleanup completed!"
+```
+
+#### Expected Control Plane Dashboard Results
+
+After running the activity generation scripts, you should see:
+- **XDS Push Counts**: `pilot_xds_pushes_total` metrics showing configuration distribution
+- **Push Timing**: `pilot_xds_push_time` showing how long pushes take
+- **Service Discovery**: `pilot_services` showing discovered services
+- **Configuration Events**: Spikes in activity when creating/deleting resources
+- **Pilot Performance**: CPU and memory usage during configuration changes
+
+### Step 7: Complete Pipeline Validation
 
 **Validate the entire metrics pipeline with this checklist:**
 
 ```bash
 # 1. Istio Proxy Metrics Generation ✓
 echo "Step 1: Checking Istio proxy metrics..."
-kubectl exec netshoot -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
+kubectl -n bookinfo exec deployment/productpage-v1  -- curl -s localhost:15000/stats/prometheus | grep istio_requests_total | wc -l
 
 # 2. Azure Monitor Scraping ✓ 
 echo "Step 2: Checking Azure Monitor scraping..."
@@ -879,7 +953,7 @@ echo "  - Verify dashboard shows data"
 echo "Pipeline validation complete!"
 ```
 
-### Step 7: Key Metrics to Monitor
+### Step 8: Key Metrics to Monitor
 
 **Essential Grafana queries for Istio metrics:**
 
@@ -900,7 +974,7 @@ sum(rate(istio_requests_total{response_code=~"5.*"}[5m])) by (destination_servic
 sum(rate(istio_requests_total{destination_service_name="productpage"}[5m]))
 ```
 
-### Step 8: Enable Container Insights (Optional)
+### Step 9: Enable Container Insights (Optional)
 
 **For additional container and node-level monitoring:**
 
@@ -1144,105 +1218,82 @@ Kiali is a service mesh observability console that provides visualization and ma
 
 Kiali can be configured to use Azure Monitor Managed Prometheus as its data source, providing seamless integration with your existing monitoring infrastructure.
 
-View repo:  https://github.com/Azure/AKS/tree/master/examples/istio-based-service-mesh/observability/kiali  
-
-Use "Option 2: Azure Monitor Managed Prometheus"
-
 ```bash
 # Navigate to a temporary directory
 cd /tmp
 
-# Optionally clone the Azure AKS examples repository
+# Clone the Azure AKS examples repository
 git clone https://github.com/Azure/AKS.git
 cd AKS/examples/istio-based-service-mesh/observability/kiali
-
- 
+# https://github.com/Azure/AKS/tree/master/examples/istio-based-service-mesh/observability/kiali  
+# Review the Kiali configuration
+cat kiali.yaml
 ```
 
 **Configure Kiali for Azure Monitor integration:**
 
 ```bash
-# Add Kiali Helm repository
-helm repo add kiali https://kiali.org/helm-charts
-helm repo update
+# Apply Kiali configuration
+kubectl apply -f kiali.yaml
 
-# Install Kiali Operator
-helm upgrade --install \
-    --namespace kiali-operator \
-    --create-namespace \
-    kiali-operator \
-    kiali/kiali-operator
-
-# Wait for operator to be ready
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kiali-operator -n kiali-operator --timeout=300s
-
-
-# Deploy AAD Authentication Proxy - Create the namespace first
-kubectl create namespace aad-auth-proxy-ns
-# Deploy AAD auth proxy using the template file
-envsubst < aad-auth-proxy-template.yaml | kubectl apply -f -
-
-# Configure Azure RBAC  - Grant Monitoring Data Reader role to the managed identity
-export CLIENT_ID=$(az aks show -g $RESOURCE_GROUP -n $CLUSTER --query identityProfile.kubeletidentity.clientId -o tsv)
-
-az role assignment create \
-    --assignee $CLIENT_ID \
-    --role "Monitoring Data Reader" \
-    --scope $amwrid
-
-# Verify role assignment
-az role assignment list --assignee $CLIENT_ID --scope $amwrid
-
-
-# Validate AAD Auth Proxy Connection to Azure Monitor - Open a new terminal 
-kubectl port-forward -n aad-auth-proxy-ns svc/aad-auth-proxy 8082:80  
-
-# try this in a different terminal 
-curl -s "http://localhost:8082/api/v1/query?query=up" | jq '.'
-
-
-# Deploy Kiali Custom Resource
-envsubst < kiali-cr.yaml | kubectl apply -f -
-
-# Create External Service for Kiali
-kubectl apply -f kiali-external-service.yaml -n aks-istio-system
-
-# Create Service Account for Authentication
-# Create service account
-kubectl create serviceaccount kiali-dashboard -n aks-istio-system
-
-# Create cluster role binding using the Kiali-provided viewer role
-kubectl create clusterrolebinding kiali-dashboard \
-    --clusterrole=kiali-viewer \
-    --serviceaccount=aks-istio-system:kiali-dashboard
-
-# Generate access token (valid for 24 hours)
-TOKEN=$(kubectl create token kiali-dashboard -n aks-istio-system --duration=24h)
-echo "Kiali Access Token: $TOKEN"
-
-# # Get external IP and display access information
-EXTERNAL_IP=$(kubectl get service kiali-external -n aks-istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-
-echo ""
-echo "=== Kiali Access Information ==="
-echo "URL: http://$EXTERNAL_IP:20001"
-echo "Authentication: Select 'Token'"
-echo "Token: $TOKEN"
-echo ""
-echo "Copy the token above and use it to log into Kiali"
-
-
-# Generate Traffic for Visualization
-
-for i in {1..100}; do 
-  curl -s "http://$EXTERNAL_IP/productpage" > /dev/null
-  sleep 0.2
-done
-
+# Verify Kiali deployment
+kubectl get pods -n aks-istio-system | grep kiali
+kubectl get svc -n aks-istio-system | grep kiali
 ```
 
 **Expected Result**: Kiali pod should be running and service should be available.
 
+### Step 2: Access Kiali Dashboard
+
+**Option A: Using kubectl port-forward**
+
+```bash
+# Check Kiali authentication configuration
+kubectl get configmap kiali -n aks-istio-system -o yaml | grep -A 5 "require_auth"
+
+# Good news: This Kiali instance has require_auth: false, meaning authentication is optional!
+
+# Forward Kiali port to local machine
+kubectl port-forward svc/kiali -n aks-istio-system 20001:20001
+
+# Open browser to http://localhost:20001
+# You should be able to access Kiali without authentication (anonymous access)
+# If prompted for login, try clicking "Skip" or look for anonymous access option
+```
+
+**Option B: Using istioctl dashboard (if available)**
+
+```bash
+# Open Kiali dashboard directly
+istioctl dashboard kiali -n aks-istio-system
+```
+
+**Troubleshooting Kiali Access:**
+
+Since this Kiali instance has `require_auth: false`, you should be able to access it without authentication:
+
+```bash
+# Verify Kiali is running
+kubectl get pods -n aks-istio-system | grep kiali
+
+# Check Kiali service
+kubectl get svc kiali -n aks-istio-system
+
+# If you still see authentication prompts, try these solutions:
+
+# Solution 1: Use kubectl proxy (bypasses authentication entirely)
+kubectl proxy --port=8001 &
+# Then access: http://localhost:8001/api/v1/namespaces/aks-istio-system/services/kiali:20001/proxy/
+
+# Solution 2: Check for any authentication errors in Kiali logs
+kubectl logs deployment/kiali -n aks-istio-system --tail=20
+
+# Solution 3: Restart Kiali if needed
+kubectl rollout restart deployment/kiali -n aks-istio-system
+
+# Solution 4: Access via LoadBalancer (if available)
+kubectl get svc kiali -n aks-istio-system -o wide
+```
 
 **Alternative Authentication (if needed):**
 
@@ -1272,7 +1323,7 @@ export KIALI_TOKEN=$(az account get-access-token --query accessToken -o tsv)
 ### Step 3: Explore Service Topology
 
 **Generate traffic to visualize service interactions:**
-s
+
 ```bash
 # Generate traffic to bookinfo application
 export INGRESS_IP=$(kubectl get svc -n aks-istio-ingress aks-istio-ingressgateway-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
@@ -1297,7 +1348,6 @@ done
 - Traffic flow with request rates and response times
 - Health indicators for each service
 
-![alt text](image-1.png)
 ---
 
 ## Lab Exercise 5: Distributed Tracing with Jaeger
@@ -1368,52 +1418,6 @@ kubectl get svc -n aks-istio-system | grep zipkin
 
 ### Step 3: Test Local Tracing (Without Gateway)
 
-kubectl create serviceaccount httpbin -n testns2
-
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: httpbin
-  namespace: testns
-  labels:
-    app: httpbin
-    service: httpbin
-spec:
-  ports:
-  - name: http
-    port: 8000
-    targetPort: 8080
-  selector:
-    app: httpbin
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: httpbin
-  namespace: testns
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: httpbin
-      version: v1
-  template:
-    metadata:
-      labels:
-        app: httpbin
-        version: v1
-    spec:
-      containers:
-      - image: docker.io/mccutchen/go-httpbin:v2.15.0
-        imagePullPolicy: IfNotPresent
-        name: httpbin
-        ports:
-        - containerPort: 8080
-EOF
-```
 **Set up port forwarding to test httpbin directly:**
 
 ```bash
