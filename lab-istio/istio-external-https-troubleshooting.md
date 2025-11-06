@@ -32,11 +32,11 @@ The error often appears after enabling Istio sidecar injection, making it seem l
 - Use ServiceEntry resources for external service access control
 - Default behavior is typically `ALLOW_ANY` for outbound traffic
 
-**🆕 Update November 2025**: Alpine 3.22+ now includes CA certificates by default, making this error less common. However, it still affects:
-- Older base images (Alpine <3.22, Ubuntu <20.04, Debian <11)
-- Custom minimal images (FROM scratch, base distroless)
-- Legacy enterprise applications
-- Containers with explicitly removed CA certificates
+**Common Affected Images**:
+- Custom minimal images (FROM scratch, distroless base)
+- Older base images that don't bundle CA certificates
+- Enterprise images built from minimal foundations
+- Containers with explicitly removed or missing `/etc/ssl/certs`
 
 ---
 
@@ -49,14 +49,14 @@ The error often appears after enabling Istio sidecar injection, making it seem l
 | Can you access HTTPS without Istio sidecar? | **Container image issue** (missing CA certs) | Network/DNS issue |
 | Does `ls /etc/ssl/certs/ca-certificates.crt` show a file >100KB? | Likely mesh config or network issue | **Missing CA certificates** (fix image) |
 | Does the pod have 2 containers (app + istio-proxy)? | Istio injected ✅ continue troubleshooting | Enable sidecar injection first |
-| Using Alpine <3.22 or custom minimal image? | **Missing CA certs** (install them) | Check other causes below |
+| Using custom/minimal base image? | **Check for CA certs** | Likely modern image with certs included |
 
 **Common Error Patterns:**
 
 | Symptom | Root Cause | Quick Check | Solution |
 |---------|------------|-------------|----------|
 | `curl: (77) error setting certificate verify locations` | **Missing CA certs in container** | `ls /etc/ssl/certs/ca-certificates.crt` | Install ca-certificates package |
-| Works without Istio, fails with Istio | **Container needs own CA certs** | Check Alpine version: `cat /etc/alpine-release` | Use Alpine 3.22+ or install ca-certificates |
+| Works without Istio, fails with Istio | **Container needs own CA certs** | Check if file exists: `ls -lh /etc/ssl/certs/ca-certificates.crt` | Install ca-certificates in your image |
 | `curl: (60) SSL certificate problem` | CA certs exist but invalid/outdated | `curl --version` check SSL lib | Update ca-certificates package |
 | `curl: (6) Could not resolve host` | DNS issue, not CA certs | `nslookup google.com` | Check DNS/network config |
 | `curl: (7) Failed to connect` | Network/firewall blocking | Check AuthorizationPolicy | Review Istio security policies |
@@ -105,19 +105,102 @@ Error happens HERE ↑     NOT here              NOT here
 
 **Why It Seems Like an Istio Issue**:
 - The error often appears **after** enabling Istio sidecar injection
-- But that's because containers that worked before were relying on node-level CA certificates
-- With Istio, the container's **own CA certificates** are required
+- But enabling Istio typically coincides with other changes:
+  - Kubernetes version upgrades
+  - Stricter pod security policies
+  - Removal of non-standard host path mounts
+  - Enforcement of container isolation
+- These changes expose pre-existing issues with missing dependencies in container images
+- The container's **own CA certificates** are required for portability
+
+### Understanding Node vs Pod Certificates
+
+**Why this confusion exists:**
+
+In some Kubernetes configurations, containers might have had access to the **node's CA certificates** through:
+- Specific host path volume mounts
+- Shared filesystem configurations
+- Less restrictive pod security policies
+
+**What may have changed:**
+
+When you enable Istio sidecar injection, environments often also:
+- Update to more recent Kubernetes versions with stricter isolation
+- Enforce pod security standards (baseline or restricted)
+- Apply more restrictive network and security policies
+- Remove non-standard host path mounts
+
+**The Reality:**
+```
+❌ Incorrect assumption: "Istio broke my HTTPS access"
+✅ Actual situation: "My container lacks CA certificates; 
+                     it may have worked before due to 
+                     non-standard node filesystem access"
+```
+
+**Node Certificates vs Pod Certificates:**
+
+| Aspect | Node Certificates | Pod Certificates |
+|--------|-------------------|------------------|
+| **Location** | `/etc/ssl/certs` on the Kubernetes node | `/etc/ssl/certs` inside the container image |
+| **Managed By** | OS package manager on the node | Container image build process |
+| **Scope** | Available to node processes | Available only to that container |
+| **Portability** | Requires specific node configuration | ✅ Works on any Kubernetes cluster |
+| **Isolation** | Breaks container isolation principles | ✅ Maintains proper container boundaries |
+| **Recommended** | Not for container workloads | ✅ For all containerized applications |
+
+**Why Your Container Should Have Its Own CA Certificates:**
+
+1. **Portability**: Your container works consistently across different Kubernetes clusters and cloud providers
+2. **Isolation**: Containers remain self-contained without external filesystem dependencies
+3. **Predictability**: Behavior doesn't depend on node configuration
+4. **12-Factor Methodology**: Explicitly declare all dependencies ([12factor.net/dependencies](https://12factor.net/dependencies))
+
+**When It Seemed to "Work Before":**
+
+```bash
+# Scenario 1: Before (may have worked with non-standard configuration)
+Your container → Accessed node's /etc/ssl/certs → HTTPS worked
+(Non-portable, configuration-dependent)
+
+# Scenario 2: With stricter isolation (Istio/modern K8s)
+Your container → No CA certs → HTTPS fails ❌
+(Exposes the missing dependency)
+
+# Scenario 3: Properly built image (recommended)
+Your container → Container's /etc/ssl/certs → HTTPS works ✅
+(Portable, works everywhere)
+```
 
 **The Fix** (99% of cases):
 ```dockerfile
-# In your Dockerfile - add CA certificates
-FROM alpine:3.15  # or any older base image
-RUN apk add --no-cache ca-certificates  # ← This fixes it
+# In your Dockerfile - explicitly include CA certificates
+
+# For Debian/Ubuntu-based images
+FROM ubuntu:20.04
+RUN apt-get update && apt-get install -y ca-certificates
+
+# For Alpine-based images
+FROM alpine:3.15
+RUN apk add --no-cache ca-certificates
+
+# For Red Hat/CentOS-based images
+FROM registry.access.redhat.com/ubi8/ubi
+RUN yum install -y ca-certificates
 ```
 
-**Modern Images** (2025+):
-- Alpine 3.22+, Ubuntu 24.04, Debian 12 all include CA certificates by default
-- If using these, you likely won't see the error at all
+**References:**
+- [12-Factor App: Dependencies](https://12factor.net/dependencies) - "A twelve-factor app never relies on implicit existence of system-wide packages"
+- [Kubernetes Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) - Restricted profile limits host filesystem access
+
+**Key Takeaway:**
+> Container images should include all required dependencies, including CA certificates. If your container doesn't have CA certificates in `/etc/ssl/certs/`, it will fail to verify HTTPS connections - **with or without Istio**.
+
+**This Error Occurs:**
+- ✅ In pods WITH Istio sidecar (no CA certs in container)
+- ✅ In pods WITHOUT Istio sidecar (no CA certs in container)
+- ❌ NOT because Istio blocks traffic
+- ❌ NOT because of mesh configuration
 
 ---
 
@@ -394,7 +477,7 @@ curl -sSI https://www.google.com 2>&1 | head -5
 ### 2.6: Understanding the Findings
 
 ```bash
-# If alpine:latest worked, verify what's included
+# Verify what's in the test containers
 kubectl exec -it test-pod-alpine-latest -n test-with-istio -c alpine -- sh -c "
 echo 'Alpine version:'
 cat /etc/alpine-release
@@ -403,18 +486,18 @@ echo 'Installed packages:'
 apk info | grep -E 'ca-certificates|ssl|crypto'
 echo ''
 echo 'CA certificate file size:'
-ls -lh /etc/ssl/certs/ca-certificates.crt
+ls -lh /etc/ssl/certs/ca-certificates.crt 2>&1
 "
 ```
 
 **Key Insight**: 
-- **Alpine 3.22+** includes `ca-certificates-bundle` by default
-- This means the error is LESS common with newer images
-- The error typically occurs with:
-  - Custom minimal images (FROM scratch, distroless without SSL)
-  - Older Alpine versions without CA bundle
+- Different base images may or may not include CA certificates
+- The error occurs when the container lacks `/etc/ssl/certs/ca-certificates.crt`
+- This error happens **with or without Istio sidecar**
+- Common sources of missing CA certs:
+  - Custom minimal images (FROM scratch, base distroless)
+  - Base images without CA bundles
   - Images where CA certs were explicitly removed
-  - Non-Alpine minimal images (busybox, etc.)
 
 ### 2.7: Deploy Test Pod Explicitly Without CA Certificates (Guaranteed Reproduction)
 
@@ -866,6 +949,8 @@ EOF
 kubectl exec -it test-pod-with-certs -n test-with-istio -c alpine -- curl -sSI https://www.google.com
 ```
 
+**Reference**: [Istio ServiceEntry for External Services](https://istio.io/latest/docs/tasks/traffic-management/egress/egress-control/#access-an-external-https-service) - Official Istio documentation
+
 **Solution 2C: Request Azure Support to Change Mesh Config**
 
 If you need to change the mesh configuration globally:
@@ -881,6 +966,8 @@ az aks show --resource-group <rg-name> --name <cluster-name> \
 # Note: As of now, AKS Istio addon doesn't expose outboundTrafficPolicy
 # configuration through Azure CLI. Use ServiceEntry approach instead.
 ```
+
+**Reference**: [AKS Istio Service Mesh Add-on](https://learn.microsoft.com/azure/aks/istio-about) - Official Azure documentation for AKS Istio addon
 
 ### Scenario 3: TLS Origination Issues
 
@@ -919,6 +1006,8 @@ spec:
 EOF
 ```
 
+**Reference**: [Istio DestinationRule TLS Settings](https://istio.io/latest/docs/reference/config/networking/destination-rule/#ClientTLSSettings) - Official API documentation for TLS configuration
+
 ### Scenario 4: Security Policy Blocking Outbound Traffic
 
 **Problem**: AuthorizationPolicy or PeerAuthentication blocking external traffic.
@@ -934,6 +1023,8 @@ kubectl get peerauthentications -A
 # Check Istio logs for denials
 kubectl logs -n aks-istio-system deployment/istiod | grep -i "deny"
 ```
+
+**Reference**: [Istio Authorization Policy](https://istio.io/latest/docs/reference/config/security/authorization-policy/) - Official authorization documentation
 
 **Solution 4: Create ALLOW Policy for External Traffic**
 
@@ -1082,6 +1173,8 @@ outboundTrafficPolicy:
   mode: REGISTRY_ONLY
 ```
 
+**Reference**: [Istio Traffic Management - Egress](https://istio.io/latest/docs/tasks/traffic-management/egress/) - Official Istio documentation on controlling egress traffic
+
 ### 6.2: Standard ServiceEntry Template for External HTTPS
 
 ```bash
@@ -1109,6 +1202,8 @@ spec:
 EOF
 ```
 
+**Reference**: [Istio ServiceEntry Documentation](https://istio.io/latest/docs/reference/config/networking/service-entry/) - Official API reference for ServiceEntry configuration
+
 ### 6.3: Container Image Best Practices
 
 Always include CA certificates in your base images:
@@ -1128,6 +1223,10 @@ RUN apt-get update && \
 FROM gcr.io/distroless/static-debian11
 # Distroless images include CA certificates by default
 ```
+
+**References**: 
+- [12-Factor App: Dependencies](https://12factor.net/dependencies) - Explicitly declare and isolate dependencies
+- [Docker Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/) - Official Docker image building guidelines
 
 ---
 
@@ -1171,24 +1270,17 @@ Is external HTTPS access failing?
 │         │   │
 │         │   └─ Check if pod has Istio sidecar
 │         │       │
-│         │       ├─ NO sidecar → Application/network issue (not Istio-related)
+│         │       ├─ NO sidecar → Check CA certificates (same issue without Istio)
+│         │       │               └─ Install ca-certificates in image → SUCCESS
 │         │       │
 │         │       └─ HAS sidecar → Check CA certificates
-│         │                        │
-│         │                        ├─ Check Alpine version
-│         │                        │   │
-│         │                        │   ├─ 3.22+ → Should have ca-certificates-bundle
-│         │                        │   │          Check: apk info | grep ca-certificates
-│         │                        │   │          └─ If missing → Install ca-certificates
-│         │                        │   │
-│         │                        │   └─ <3.22 → Likely missing ca-certificates
-│         │                                       └─ Install ca-certificates → SUCCESS
 │         │                        │
 │         │                        └─ Check if /etc/ssl/certs/ca-certificates.crt exists
 │         │                            │
 │         │                            ├─ File missing/empty → Install ca-certificates
 │         │                            │                       └─ Retry → SUCCESS
 │         │                            │
+│         │                            └─ File exists (>100KB) → Check mesh config
 │         │                            └─ File exists (>100KB) → Check mesh config
 │         │                                                      └─ See curl: (7) flow
 │         │
@@ -1249,25 +1341,24 @@ kubectl exec $POD -n $NS -c istio-proxy -- curl -sSI https://www.google.com -m 3
 
 ## Summary
 
-The `curl: (77)` error when accessing external HTTPS sites from Istio-injected pods is caused by missing CA certificates in the application container, but this is becoming **less common with modern base images**.
-
-### **Important Update (November 2025)**
-
-**Alpine 3.22+ includes `ca-certificates-bundle` by default**, which means:
-- ✅ `alpine:latest` images now work out-of-the-box for HTTPS
-- ✅ No need to explicitly install `ca-certificates` package on newer Alpine
-- ⚠️ Older Alpine versions (3.15 and earlier) still need explicit installation
-- ⚠️ Custom minimal images (FROM scratch, distroless) may still need CA certs
+The `curl: (77)` error when accessing external HTTPS sites from pods is caused by **missing CA certificates in the application container**. This affects pods with or without Istio sidecars.
 
 ### **Root Causes (in order of likelihood)**
 
-1. **Most Common (but decreasing)**: Missing CA certificates in the application container
-   - **Affects**: Older Alpine (<3.22), custom minimal images, distroless without SSL variant
+1. **Most Common**: Missing CA certificates in the application container
+   - **Affects**: Custom minimal images, base images without CA bundles, containers with removed certs
    - **Solution**: Install `ca-certificates` package in your container image
    - **Quick Fix**: 
-     - Alpine: `apk add --no-cache ca-certificates` (older versions)
-     - Debian/Ubuntu: `apt-get install -y ca-certificates`
-     - Use newer base images (Alpine 3.22+) that include certs by default
+     ```dockerfile
+     # Debian/Ubuntu
+     RUN apt-get update && apt-get install -y ca-certificates
+     
+     # Alpine
+     RUN apk add --no-cache ca-certificates
+     
+     # RHEL/CentOS/UBI
+     RUN yum install -y ca-certificates
+     ```
 
 2. **Rare with AKS**: Mesh configured with `REGISTRY_ONLY` mode
    - **AKS Default**: NOT configured, defaults to `ALLOW_ANY` (permissive)
@@ -1284,16 +1375,18 @@ The `curl: (77)` error when accessing external HTTPS sites from Istio-injected p
 - ✅ The Istio sidecar (Envoy proxy) passes through HTTPS traffic transparently
 - ✅ **Your application container still needs CA certificates** to validate external HTTPS certificates
 - ℹ️ The sidecar acts as a TCP proxy for HTTPS, not a TLS terminator, so certificate validation happens in your app
+- ⚠️ **This is NOT an Istio issue** - the same container will fail without Istio if it lacks CA certificates
 - ✅ Modern base images (Alpine 3.22+) include CA certificates by default
 
 ### **When You'll Actually See the Error**
 
 The `curl: (77)` error occurs when:
 - Using custom minimal images built FROM scratch
-- Using older Alpine versions (<3.22) without installing ca-certificates
-- Using distroless images without the SSL variant
+- Using base images without CA certificates
 - Explicitly removing CA certificates from the container
-- Using legacy base images that don't include CA bundle
+- Container image doesn't include `/etc/ssl/certs/ca-certificates.crt`
+
+**Important**: This error occurs **with or without Istio**. If your container lacks CA certificates, HTTPS will fail regardless of Istio presence.
 
 ### **Quick Diagnosis**
 
@@ -1311,21 +1404,75 @@ kubectl exec <pod> -c <container> -- ls -la /etc/ssl/certs/ca-certificates.crt
 
 ### **Best Practice Recommendations**
 
-**For New Applications (2025+)**:
-- ✅ Use modern base images: `alpine:3.22`, `ubuntu:24.04`, `debian:12`
-- ✅ These include CA certificates by default
-- ✅ No additional packages needed for HTTPS
-
-**For Legacy Applications**:
-- Add explicit CA certificate installation in Dockerfile:
+**For All Container Images**:
+- ✅ **Always include CA certificates explicitly** in your Dockerfile
+- ✅ Don't rely on base images to include them - verify!
+- ✅ Test your images for HTTPS access before deployment
   ```dockerfile
-  # Alpine (old versions)
+  # Add to your Dockerfile based on base image:
+  
+  # Debian/Ubuntu-based
+  RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+  
+  # Alpine-based
   RUN apk add --no-cache ca-certificates
   
-  # Debian/Ubuntu
-  RUN apt-get update && apt-get install -y ca-certificates
+  # Red Hat/CentOS/UBI-based
+  RUN yum install -y ca-certificates && yum clean all
   ```
 
-**For Maximum Security**:
+**Verification During Image Build**:
+```dockerfile
+# Add this to your Dockerfile to verify CA certs are present
+RUN test -f /etc/ssl/certs/ca-certificates.crt || \
+    (echo "ERROR: CA certificates not found!" && exit 1)
+```
+
+**For Maximum Security (Production)**:
 - Use `REGISTRY_ONLY` mode with explicit ServiceEntry resources
 - Only allow specific external domains needed by your application
+- Regularly update CA certificates in your base images
+
+**References**:
+- [12-Factor App: Dependencies](https://12factor.net/dependencies) - Industry standard for cloud-native applications
+- [Docker Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/) - Official Docker guidelines
+- [Istio Egress Traffic Control](https://istio.io/latest/docs/tasks/traffic-management/egress/) - Official Istio egress documentation
+- [Kubernetes Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) - Container isolation principles
+
+
+---
+
+## References and Documentation
+
+All recommendations in this guide are based on official documentation from trusted sources:
+
+### Istio Official Documentation
+- [Istio Traffic Management - Egress Control](https://istio.io/latest/docs/tasks/traffic-management/egress/) - Controlling egress traffic
+- [Istio ServiceEntry API Reference](https://istio.io/latest/docs/reference/config/networking/service-entry/) - ServiceEntry configuration
+- [Istio DestinationRule API Reference](https://istio.io/latest/docs/reference/config/networking/destination-rule/) - TLS settings and traffic policies
+- [Istio Authorization Policy](https://istio.io/latest/docs/reference/config/security/authorization-policy/) - Security policies
+- [Istio Best Practices](https://istio.io/latest/docs/ops/best-practices/) - Production deployment guidance
+
+### Azure Kubernetes Service (AKS)
+- [AKS Istio Service Mesh Add-on](https://learn.microsoft.com/azure/aks/istio-about) - Official AKS Istio addon documentation
+- [Deploy Istio-based service mesh add-on for AKS](https://learn.microsoft.com/azure/aks/istio-deploy-addon) - Installation and configuration
+
+### Kubernetes
+- [Kubernetes Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) - Security best practices
+- [Kubernetes Security Best Practices](https://kubernetes.io/docs/concepts/security/) - General security guidance
+
+### Container Best Practices
+- [12-Factor App: Dependencies](https://12factor.net/dependencies) - Cloud-native application principles
+- [Docker Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/) - Official Docker guidelines
+- [Google Cloud: Best practices for building containers](https://cloud.google.com/architecture/best-practices-for-building-containers) - Container image optimization
+
+### Certificate Management
+- [Alpine Linux Packages](https://pkgs.alpinelinux.org/packages) - Package information including ca-certificates
+- [Debian ca-certificates](https://packages.debian.org/stable/ca-certificates) - Debian package details
+- [Ubuntu ca-certificates](https://packages.ubuntu.com/search?keywords=ca-certificates) - Ubuntu package details
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: November 2025  
+**Maintained For**: AKS Istio Add-on (asm-1-26 and compatible versions)
