@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-proxy-istio-style
+  labels:
+    app: envoy-proxy-istio-style
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy-proxy-istio-style
+  template:
+    metadata:
+      labels:
+        app: envoy-proxy-istio-style
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.29-latest
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9901
+          name: admin
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy
+          readOnly: true
+        command:
+        - /usr/local/bin/envoy
+        args:
+        - -c
+        - /etc/envoy/envoy.yaml
+        - --service-cluster
+        - envoy-proxy-istio-style
+        - --service-node
+        - envoy-proxy-istio-style
+        - --log-level
+        - info
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 9901
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 9901
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: envoy-config
+        configMap:
+          name: envoy-config-istio-style
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-proxy-istio-style
+  labels:
+    app: envoy-proxy-istio-style
+spec:
+  selector:
+    app: envoy-proxy-istio-style
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  - name: admin
+    port: 9901
+    targetPort: 9901
+    protocol: TCP
+  type: LoadBalancer

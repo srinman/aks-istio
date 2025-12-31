@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config-istio-style
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: listener_0
+        address:
+          socket_address:
+            address: 0.0.0.0
+            port_value: 8080
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: ingress_http
+              access_log:
+              - name: envoy.access_loggers.stdout
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                  log_format:
+                    text_format: |
+                      [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%"
+                      %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT%
+                      %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%"
+                      "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%"
+                      "%UPSTREAM_HOST%" %UPSTREAM_CLUSTER%
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: echo_service
+                  domains: ["*"]
+                  routes:
+                  - match:
+                      prefix: "/"
+                    route:
+                      cluster: echo_cluster_direct_pods
+                      timeout: 30s
+                    request_headers_to_add:
+                    - header:
+                        key: "x-envoy-proxy"
+                        value: "istio-style-envoy"
+                    - header:
+                        key: "x-forwarded-by"
+                        value: "envoy-direct-pods"
+
+      # This is how Istio would configure Envoy - with direct pod IPs
+      # Istio's control plane discovers pods via Kubernetes API and programs Envoy via xDS
+      clusters:
+      - name: echo_cluster_direct_pods
+        connect_timeout: 5s
+        type: STATIC               # Static endpoints (Istio uses EDS - Endpoint Discovery Service)
+        lb_policy: ROUND_ROBIN     # Envoy controls the load balancing, NOT Kubernetes Service
+        health_checks:
+        - timeout: 1s
+          interval: 10s
+          unhealthy_threshold: 2
+          healthy_threshold: 2
+          http_health_check:
+            path: "/"
+            expected_statuses:
+            - start: 200
+              end: 299
+        load_assignment:
+          cluster_name: echo_cluster_direct_pods
+          endpoints:
+          - lb_endpoints:
+            # Pod 1 - Direct IP (bypassing Kubernetes Service)
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 10.244.0.26    # echo-service-86d4747cb8-4kfrj
+                    port_value: 8080        # Direct pod port, not service port
+            # Pod 2 - Direct IP
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 10.244.1.26    # echo-service-86d4747cb8-qncxk
+                    port_value: 8080
+            # Pod 3 - Direct IP
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 10.244.2.12    # echo-service-86d4747cb8-rwsrg
+                    port_value: 8080
+
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
