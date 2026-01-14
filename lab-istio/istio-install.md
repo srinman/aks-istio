@@ -150,8 +150,8 @@ workloadgroups.networking.istio.io                           2024-10-21T20:57:52
 A default ConfigMap is created when the Istio add-on is enabled. Check it using your revision number:
 
 ```bash
-# Replace 'asm-1-25' with your actual revision number from Step 1.6
-kubectl get cm istio-asm-1-25 -n aks-istio-system -o yaml
+# Replace 'asm-1-26' with your actual revision number from Step 1.6
+kubectl get cm istio-asm-1-26 -n aks-istio-system -o yaml
 ```
 
 ## Part 3: Deploy and Test Sample Applications

@@ -287,7 +287,7 @@ Label the default namespace to enable automatic sidecar injection:
 kubectl get ns --show-labels | grep -i asm-
 
 # Label the default namespace for sidecar injection (use your revision)
-kubectl label namespace default istio.io/rev=asm-1-25
+kubectl label namespace default istio.io/rev=asm-1-26
 
 # Verify the label was applied
 kubectl get ns default --show-labels
@@ -339,10 +339,12 @@ Let's first look at the current ingress gateway configuration:
 
 ```bash
 # Check current listeners on the ingress gateway
-istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-25
+kubectl delete gateway --all -A
+istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-26
 
 # Check current routes (should be minimal)
-istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25
+kubectl delete virtualservice --all -A
+istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-26
 ```
 
 ### Step 3.2: Create Gateway Resource
@@ -380,10 +382,10 @@ Check how the Gateway affects the ingress gateway configuration:
 
 ```bash
 # Check listeners again - should now show HTTP listener on port 80
-istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-25
+istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-26
 
 # Check routes - blackhole route 
-istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25
+istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-26
 
 # List gateways
 kubectl get gateway
@@ -444,13 +446,13 @@ Now check the complete ingress configuration:
 
 ```bash
 # Check listeners (should show HTTP:80)
-istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-25
+istioctl -n aks-istio-ingress proxy-config listener deploy/aks-istio-ingressgateway-external-asm-1-26
 
 # Check routes (should now show our routing rules)
-istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25
+istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-26
 
 # Get detailed route configuration
-istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-25 -o json --name http.80
+istioctl -n aks-istio-ingress proxy-config route deploy/aks-istio-ingressgateway-external-asm-1-26 -o json --name http.80
 
 # List all gateways and virtual services
 kubectl get gateway

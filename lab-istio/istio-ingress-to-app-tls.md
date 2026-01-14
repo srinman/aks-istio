@@ -94,23 +94,23 @@ Extract and decode the actual certificate content:
 # Get the certificate in JSON format and extract the base64-encoded certificate
 istioctl -n aks-istio-ingress proxy-config secret $GATEWAY_POD -o json | \
   jq -r '.dynamicActiveSecrets[] | select(.name=="default") | .secret.tlsCertificate.certificateChain.inlineBytes' | \
-  base64 -d > gateway_cert.pem
+  base64 -d > /tmp/gateway_cert.pem
 
 # View certificate details
-openssl x509 -in gateway_cert.pem -text -noout
+openssl x509 -in /tmp/gateway_cert.pem -text -noout
 
 # Extract specific certificate information
 echo "=== Certificate Subject ==="
-openssl x509 -in gateway_cert.pem -noout -subject
+openssl x509 -in /tmp/gateway_cert.pem -noout -subject
 
 echo "=== Certificate Issuer ==="
-openssl x509 -in gateway_cert.pem -noout -issuer
+openssl x509 -in /tmp/gateway_cert.pem -noout -issuer
 
 echo "=== SPIFFE Identity (SAN) ==="
-openssl x509 -in gateway_cert.pem -noout -text | grep -A5 "Subject Alternative Name"
+openssl x509 -in /tmp/gateway_cert.pem -noout -text | grep -A5 "Subject Alternative Name"
 
 # Clean up
-rm gateway_cert.pem
+rm /tmp/gateway_cert.pem
 ```
 
 ## 🔍 Deep Dive Analysis Results
